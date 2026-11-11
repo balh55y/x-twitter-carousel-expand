@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.0.0
-// @description  展开 X 轮播图、支持选择复制类型 (JPEG/PNG/WebP)、自定义压缩质量与尺寸缩放，并实时预测文件大小
+// @version      6.2.1
+// @description  展开 X 轮播图，支持图片格式、质量与尺寸设置；桌面导航贴左，保留右上角搜索，支持切换内容宽度
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -19,17 +19,24 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.0.0';
+    const VERSION = '6.2.1';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
     const STYLE_ID = '__x_carousel_style_v6__';
+    const WIDTH_BUTTON_ID = '__x_carousel_width_v6__';
+    const WIDTH_MODES = [
+        { id: 'standard', label: '标准', width: '600px' },
+        { id: 'wide', label: '加宽', width: '960px' },
+        { id: 'full', label: '全宽', width: '100%' }
+    ];
 
     // 本地持久化配置键名
     const STORAGE_KEYS = {
         FORMAT: '__x_carousel_format_v6__',
         QUALITY: '__x_carousel_quality_v6__',
-        SCALE: '__x_carousel_scale_v6__'
+        SCALE: '__x_carousel_scale_v6__',
+        CONTENT_WIDTH: '__x_carousel_content_width_v6__'
     };
 
     let observer = null;
@@ -58,6 +65,132 @@
     }
 
     // ==========================================================
+    // 切换桌面内容宽度，刷新页面后保留选择。
+    // ==========================================================
+    function initWidthControl() {
+        if (document.getElementById(WIDTH_BUTTON_ID)) return;
+
+        let storedMode = null;
+        try {
+            storedMode = localStorage.getItem(STORAGE_KEYS.CONTENT_WIDTH);
+        } catch {
+            // 存储不可用时，仍能切换本次页面的宽度。
+        }
+        let modeIndex = WIDTH_MODES.findIndex(mode => mode.id === storedMode);
+        if (modeIndex < 0) modeIndex = 1;
+
+        const button = document.createElement('button');
+        button.id = WIDTH_BUTTON_ID;
+        button.type = 'button';
+
+        function applyMode() {
+            const mode = WIDTH_MODES[modeIndex];
+            const next = WIDTH_MODES[(modeIndex + 1) % WIDTH_MODES.length];
+            document.documentElement.style.setProperty('--x-carousel-content-width', mode.width);
+            button.dataset.mode = mode.id;
+            button.textContent = `切换宽度：${mode.label}`;
+            button.title = mode.id === 'full' ? '内容占满导航栏右侧的空间' : `内容宽度上限：${parseInt(mode.width, 10)} px`;
+            button.setAttribute('aria-label', `切换内容宽度，当前${mode.label}，下一个${next.label}`);
+        }
+
+        button.addEventListener('click', () => {
+            modeIndex = (modeIndex + 1) % WIDTH_MODES.length;
+            applyMode();
+            try {
+                localStorage.setItem(STORAGE_KEYS.CONTENT_WIDTH, WIDTH_MODES[modeIndex].id);
+            } catch {
+                // 本次页面的选择已生效。
+            }
+        });
+
+        applyMode();
+        document.body.appendChild(button);
+    }
+
+    // 保留原生搜索组件及搜索建议，避免移动 React 管理的节点。
+    function initSearchLayout() {
+        let timer = null;
+        let markedPath = [];
+        let searchHost = null;
+        let header = null;
+        let columns = null;
+        let primary = null;
+        const resizeObserver = new ResizeObserver(schedule);
+
+        function schedule() {
+            if (timer !== null) return;
+            timer = setTimeout(() => {
+                timer = null;
+                sync();
+            }, 100);
+        }
+
+        function sync() {
+            const nextPrimary = document.querySelector('#react-root [data-testid="primaryColumn"]');
+            const sidebar = document.querySelector('#react-root [data-testid="sidebarColumn"]');
+            const form = sidebar?.querySelector('form[role="search"]');
+            if (nextPrimary !== primary) {
+                if (primary) resizeObserver.unobserve(primary);
+                primary = nextPrimary;
+                if (primary) resizeObserver.observe(primary);
+            }
+
+            const nextColumns = primary?.parentElement;
+            if (nextColumns !== columns) {
+                columns?.removeAttribute('data-x-carousel-columns');
+                columns = nextColumns;
+                columns?.setAttribute('data-x-carousel-columns', '');
+            }
+
+            let nextHost = null;
+            if (form) {
+                nextHost = searchHost?.contains(form) ? searchHost : form;
+                if (nextHost === form) {
+                    for (let node = form.parentElement; node && node !== sidebar; node = node.parentElement) {
+                        if (['fixed', 'sticky'].includes(getComputedStyle(node).position)) {
+                            nextHost = node;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            const nextPath = [];
+            for (let node = nextHost; node && node !== sidebar; node = node.parentElement) {
+                nextPath.push(node);
+            }
+            for (const node of markedPath) {
+                if (!nextPath.includes(node)) node.removeAttribute('data-x-carousel-search-path');
+            }
+            for (const node of nextPath) node.setAttribute('data-x-carousel-search-path', '');
+            markedPath = nextPath;
+            if (searchHost !== nextHost) {
+                searchHost?.removeAttribute('data-x-carousel-search-host');
+                searchHost = nextHost;
+                searchHost?.setAttribute('data-x-carousel-search-host', '');
+            }
+
+            const nextHeader = primary && form ? [...primary.querySelectorAll(':scope > div, :scope > div > div')]
+                .find(node => getComputedStyle(node).position === 'sticky') : null;
+            if (nextHeader !== header) {
+                header?.removeAttribute('data-x-carousel-search-header');
+                header?.style.removeProperty('--x-carousel-search-inset');
+                header = nextHeader;
+                header?.setAttribute('data-x-carousel-search-header', '');
+            }
+            if (header) {
+                const inset = innerWidth >= 1000 && searchHost
+                    ? Math.max(0, Math.ceil(primary.getBoundingClientRect().right - sidebar.getBoundingClientRect().left + 16)) : 0;
+                header.style.setProperty('--x-carousel-search-inset', `${inset}px`);
+            }
+        }
+
+        new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('resize', schedule, { passive: true });
+        sync();
+    }
+
+    // ==========================================================
     // 工具函数：格式化字节大小
     // ==========================================================
     function formatBytes(bytes) {
@@ -76,6 +209,167 @@
         const style = document.createElement('style');
         style.id = STYLE_ID;
         style.textContent = `
+            /* 桌面内容宽度随按钮选择变化。 */
+            @media (min-width: 1000px) {
+                #react-root:has([data-testid="primaryColumn"]) {
+                    --x-carousel-nav-width: 88px;
+                }
+
+                #react-root:has([data-testid="primaryColumn"]) header[role="banner"] {
+                    flex: 0 0 var(--x-carousel-nav-width) !important;
+                    width: var(--x-carousel-nav-width) !important;
+                    min-width: 0 !important;
+                    align-items: flex-start !important;
+                }
+
+                #react-root:has([data-testid="primaryColumn"]) header[role="banner"] > div,
+                #react-root:has([data-testid="primaryColumn"]) header[role="banner"] > div > div {
+                    width: var(--x-carousel-nav-width) !important;
+                    max-width: 100% !important;
+                }
+
+                #react-root:has([data-testid="primaryColumn"]) main[role="main"] {
+                    flex: 1 1 0% !important;
+                    width: 0 !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    align-items: stretch !important;
+                }
+
+                #react-root:has([data-testid="primaryColumn"]) main[role="main"] > div {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    justify-content: center !important;
+                }
+
+                #react-root [data-x-carousel-columns] {
+                    justify-content: center !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                }
+
+                #react-root main[role="main"] [data-testid="primaryColumn"] {
+                    flex: 1 1 0% !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: var(--x-carousel-content-width, 960px) !important;
+                    box-sizing: border-box !important;
+                }
+
+                /* 解除信息流内部居中容器和推文卡片的宽度上限。 */
+                #react-root [data-testid="primaryColumn"] :is(div, section):has(article[data-testid="tweet"]),
+                #react-root [data-testid="primaryColumn"] article[data-testid="tweet"] {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    margin-inline: 0 !important;
+                    align-self: stretch !important;
+                    box-sizing: border-box !important;
+                }
+
+                /* 只展开正文和媒体的容器，保留头像、按钮及多图网格。 */
+                #react-root [data-testid="primaryColumn"] article[data-testid="tweet"] div:has([data-testid="tweetText"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"]) {
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    margin-inline: 0 !important;
+                    align-self: stretch !important;
+                    box-sizing: border-box !important;
+                }
+
+                #react-root [data-testid="primaryColumn"] article[data-testid="tweet"] [data-testid="tweetText"] {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                }
+
+                #react-root main[role="main"] [data-testid="sidebarColumn"] {
+                    display: none !important;
+                }
+
+                #react-root main[role="main"] [data-testid="sidebarColumn"]:has([data-x-carousel-search-host]) {
+                    display: flex !important;
+                    position: fixed !important;
+                    top: 6px !important;
+                    right: 16px !important;
+                    bottom: auto !important;
+                    left: auto !important;
+                    width: clamp(200px, 22vw, 350px) !important;
+                    min-width: 0 !important;
+                    height: auto !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    z-index: 10 !important;
+                    overflow: visible !important;
+                }
+
+                #react-root [data-testid="sidebarColumn"] > :not([data-x-carousel-search-path]),
+                #react-root [data-testid="sidebarColumn"] [data-x-carousel-search-path]:not([data-x-carousel-search-host]) > :not([data-x-carousel-search-path]) {
+                    display: none !important;
+                }
+
+                #react-root [data-testid="sidebarColumn"] [data-x-carousel-search-path] {
+                    position: relative !important;
+                    inset: auto !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    height: auto !important;
+                    min-height: 0 !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    box-sizing: border-box !important;
+                    overflow: visible !important;
+                }
+
+                #react-root [data-x-carousel-search-header] {
+                    padding-inline-end: var(--x-carousel-search-inset, 0px) !important;
+                    box-sizing: border-box !important;
+                }
+            }
+
+            @media (min-width: 1265px) {
+                #react-root:has([data-testid="primaryColumn"]) {
+                    --x-carousel-nav-width: 260px;
+                }
+            }
+
+            #${WIDTH_BUTTON_ID} {
+                display: none !important;
+                position: fixed !important;
+                right: 20px !important;
+                bottom: 148px !important;
+                z-index: 9999 !important;
+                align-items: center !important;
+                justify-content: center !important;
+                min-height: 40px !important;
+                padding: 10px 16px !important;
+                border: 1px solid #536471 !important;
+                border-radius: 9999px !important;
+                background: #0f1419 !important;
+                color: #fff !important;
+                font: 600 14px/1.4 system-ui, sans-serif !important;
+                white-space: nowrap !important;
+                cursor: pointer !important;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, .18) !important;
+            }
+
+            #${WIDTH_BUTTON_ID}:hover {
+                background: #272c30 !important;
+            }
+
+            #${WIDTH_BUTTON_ID}:focus-visible {
+                outline: 3px solid #1d9bf0 !important;
+                outline-offset: 3px !important;
+            }
+
+            @media (min-width: 1000px) {
+                body:has(#react-root [data-testid="primaryColumn"]) #${WIDTH_BUTTON_ID} {
+                    display: inline-flex !important;
+                }
+            }
+
             /* 帖子右上角展开按钮 */
             .${BUTTON_CLASS} {
                 width: 34px !important;
@@ -1265,6 +1559,8 @@
     // 初始化执行
     // ==========================================================
     injectStyle();
+    initWidthControl();
+    initSearchLayout();
     scan();
     console.log(`[X轮播展开] v${VERSION} 已启动 (支持格式选择/压缩调节/体积预估)`);
 })();
