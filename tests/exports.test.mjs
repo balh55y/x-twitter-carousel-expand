@@ -7,10 +7,10 @@ const source = readFileSync(new URL('../x-twitter-carousel-expand.user.js', impo
 const marker = '    // ==========================================================\n    // 初始化执行';
 assert.ok(source.includes(marker), 'Initialization marker missing');
 const testSource = source.slice(0, source.indexOf(marker)) +
-    'globalThis.api = { combineImages, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
+    'globalThis.api = { combineImages, planImageLayout, scaleImageLayout, selectedImageUrls, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
 
-function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, scheduler } = {}) {
-    const state = { closed: [], draws: [], canvas: null, requests: 0 };
+function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, scheduler, dimensions = {}, drawFailure = false } = {}) {
+    const state = { closed: [], draws: [], canvas: null, requests: 0, urls: [], decoded: 0, active: 0, maxActive: 0 };
     const values = new Map();
     const context = {
         console, Blob, setTimeout, clearTimeout, performance: { now: () => 100 },
@@ -22,20 +22,24 @@ function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, sc
                 assert.equal(tag, 'canvas');
                 state.canvas = {
                     width: 0, height: 0,
-                    getContext: () => ({ fillRect() {}, drawImage: (...args) => state.draws.push(args.slice(1)) }),
+                    getContext: () => ({ fillRect() {}, drawImage: (...args) => { if (drawFailure) throw new Error('draw failed'); state.draws.push(args.slice(1)); } }),
                     toBlob(callback, type) { callback(encodeFailure ? null : new Blob(['encoded'], { type })); }
                 };
                 return state.canvas;
             }
         },
         GM_xmlhttpRequest(options) {
+            state.urls.push(options.url);
             const index = state.requests++;
             if (index === failAt) options.onerror();
             else options.onload({ status: 200, response: new Blob([options.url]) });
         },
-        async createImageBitmap() {
-            const id = state.requests;
-            return { width: 3, height: 4, close() { state.closed.push(id); } };
+        async createImageBitmap(blob) {
+            const id = ++state.decoded;
+            const size = dimensions[await blob.text()] || { width: 3, height: 4 };
+            state.active++;
+            state.maxActive = Math.max(state.maxActive, state.active);
+            return { ...size, close() { state.closed.push(id); state.active--; } };
         }
     };
     Object.defineProperty(context, 'localStorage', { get() {
@@ -55,7 +59,9 @@ test('scaled tiles meet at rounded cumulative boundaries and resources are relea
     assert.equal(output.width, 5);
     assert.equal(output.height, 2);
     assert.deepEqual(state.draws.map(([x, , width]) => [x, width]), [[0, 2], [2, 1], [3, 2]]);
-    assert.equal(state.closed.length, 3);
+    assert.equal(state.closed.length, 6);
+    assert.equal(state.active, 0);
+    assert.equal(state.maxActive, 1);
     assert.equal(state.canvas.width, 1);
     assert.equal(state.canvas.height, 1);
 });
@@ -69,7 +75,8 @@ test('a later failed image download releases earlier decoded bitmaps', async () 
 test('failed encoding releases every bitmap and resets canvas memory', async () => {
     const { api, state } = harness({ encodeFailure: true });
     await assert.rejects(api.combineImages(['a', 'b'], options), /图片编码失败/);
-    assert.equal(state.closed.length, 2);
+    assert.equal(state.closed.length, 4);
+    assert.equal(state.active, 0);
     assert.equal(state.canvas.width, 1);
     assert.equal(state.canvas.height, 1);
 });
@@ -113,4 +120,87 @@ test('PNG clipboard fallback reports the actual written byte size', async () => 
     assert.equal(result.isFallback, true);
     assert.equal(result.size, fallback.size);
     assert.equal(writes, 1);
+});
+
+test('nonconsecutive selection retains post order and downloads only selected URLs', async () => {
+    const { api, state } = harness();
+    const images = Array.from({ length: 20 }, (_, index) => 'image-' + index);
+    const urls = api.selectedImageUrls(images, new Set([18, 1, 7]));
+    assert.deepEqual(Array.from(urls), ['image-1', 'image-7', 'image-18']);
+    await api.combineImages(urls, { ...options, layout: 'grid-2' });
+    assert.deepEqual(state.urls, ['image-1', 'image-7', 'image-18']);
+});
+
+test('empty selection cannot create a blank export or start network requests', async () => {
+    const { api, state } = harness();
+    await assert.rejects(api.combineImages([], options), /至少选择/);
+    assert.equal(state.requests, 0);
+    assert.equal(state.canvas, null);
+});
+
+test('vertical layout sums heights and keeps each image aspect ratio', async () => {
+    const { api, state } = harness({ dimensions: { a: { width: 4, height: 3 }, b: { width: 2, height: 5 } } });
+    const output = await api.combineImages(['a', 'b'], { ...options, scaleMode: '1', layout: 'vertical' });
+    assert.deepEqual([output.width, output.height], [4, 8]);
+    assert.deepEqual(state.draws, [[0, 0, 4, 3], [0, 3, 2, 5]]);
+});
+
+test('two-column grid leaves an incomplete last row without cropping', () => {
+    const { api } = harness();
+    const plan = api.planImageLayout([{width:4,height:3},{width:2,height:5},{width:3,height:2}], 'grid-2');
+    assert.deepEqual([plan.width, plan.height], [8, 7]);
+    assert.deepEqual(JSON.parse(JSON.stringify(plan.placements)), [
+        {x:0,y:0,width:4,height:3},{x:5,y:0,width:2,height:5},{x:0.5,y:5,width:3,height:2}
+    ]);
+});
+
+test('20 photos use seven rows in a three-column grid and preserve order', async () => {
+    const { api, state } = harness();
+    const result = await api.combineImages(Array.from({length:20},(_,i)=>String(i)), {...options,scaleMode:'1',layout:'grid-3'});
+    assert.deepEqual([result.width,result.height],[9,28]);
+    assert.equal(state.draws.length,20);
+    assert.deepEqual(state.draws[19],[3,24,3,4]);
+    assert.equal(state.closed.length,40);
+    assert.equal(state.active,0);
+    assert.equal(state.maxActive,1);
+});
+
+test('single selection yields the same dimensions in all layouts', () => {
+    const { api } = harness();
+    for (const layout of ['horizontal','vertical','grid-2','grid-3']) {
+        const plan = api.planImageLayout([{width:800,height:600}],layout);
+        assert.deepEqual([plan.width,plan.height],[800,600]);
+    }
+});
+
+test('height cap applies to the composed output, not individual rows', () => {
+    const { api } = harness();
+    const plan = api.planImageLayout([{width:800,height:1200},{width:800,height:1200}], 'vertical');
+    const result = api.scaleImageLayout(plan,'max-1080');
+    assert.deepEqual([result.width,result.height],[360,1080]);
+});
+
+test('oversized canvas is rejected before allocation and decoded images are released', async () => {
+    const { api, state } = harness({dimensions:{a:{width:9000,height:9000}}});
+    await assert.rejects(api.combineImages(['a'], {...options,scaleMode:'1'}), /减少选择或降低尺寸/);
+    assert.equal(state.canvas,null);
+    assert.equal(state.closed.length,1);
+});
+
+test('layout and 25 percent scale persist; invalid layout falls back', () => {
+    const { api, values } = harness();
+    values.set('__x_carousel_layout_v6__','invalid');
+    assert.equal(api.getStoredSettings().layout,'horizontal');
+    api.saveStoredSettings({layout:'grid-3',scaleMode:'0.25'});
+    assert.equal(api.getStoredSettings().layout,'grid-3');
+    assert.equal(api.getStoredSettings().scaleMode,'0.25');
+});
+
+
+test('draw failure releases the currently decoded image and canvas', async () => {
+    const { api, state } = harness({ drawFailure: true });
+    await assert.rejects(api.combineImages(['a', 'b'], options), /draw failed/);
+    assert.equal(state.active, 0);
+    assert.equal(state.closed.length, state.decoded);
+    assert.equal(state.canvas.width, 1);
 });

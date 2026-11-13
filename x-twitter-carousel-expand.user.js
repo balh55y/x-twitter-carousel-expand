@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.3.0
-// @description  展开 X 轮播图，支持图片格式、质量与尺寸设置；桌面导航贴左，保留右上角搜索，支持切换内容宽度
+// @version      6.4.0
+// @description  选择 X 帖子图片，按横向、纵向或网格排版复制和下载；支持画质、尺寸和页面宽度设置
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -19,12 +19,18 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.3.0';
+    const VERSION = '6.4.0';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
     const STYLE_ID = '__x_carousel_style_v6__';
     const WIDTH_BUTTON_ID = '__x_carousel_width_v6__';
+    const IMAGE_LAYOUTS = [
+        { id: 'horizontal', label: '横向' },
+        { id: 'vertical', label: '纵向' },
+        { id: 'grid-2', label: '两列' },
+        { id: 'grid-3', label: '三列' }
+    ];
     const WIDTH_MODES = [
         { id: 'standard', label: '标准', width: '600px' },
         { id: 'wide', label: '加宽', width: '960px' },
@@ -36,7 +42,8 @@
         FORMAT: '__x_carousel_format_v6__',
         QUALITY: '__x_carousel_quality_v6__',
         SCALE: '__x_carousel_scale_v6__',
-        CONTENT_WIDTH: '__x_carousel_content_width_v6__'
+        CONTENT_WIDTH: '__x_carousel_content_width_v6__',
+        LAYOUT: '__x_carousel_layout_v6__'
     };
 
     const sessionSettings = new Map();
@@ -68,10 +75,12 @@
         const format = readSetting(STORAGE_KEYS.FORMAT);
         const quality = Number.parseFloat(readSetting(STORAGE_KEYS.QUALITY));
         const scaleMode = readSetting(STORAGE_KEYS.SCALE);
+        const layout = readSetting(STORAGE_KEYS.LAYOUT);
         return {
             format: ['image/jpeg', 'image/png', 'image/webp'].includes(format) ? format : 'image/jpeg',
             quality: Number.isFinite(quality) ? Math.min(1, Math.max(0.3, quality)) : 0.85,
-            scaleMode: ['1', '0.75', '0.5', 'max-1440', 'max-1080'].includes(scaleMode) ? scaleMode : '1'
+            scaleMode: ['1', '0.75', '0.5', '0.25', 'max-1440', 'max-1080'].includes(scaleMode) ? scaleMode : '1',
+            layout: IMAGE_LAYOUTS.some(item => item.id === layout) ? layout : 'horizontal'
         };
     }
 
@@ -79,6 +88,7 @@
         if (settings.format) writeSetting(STORAGE_KEYS.FORMAT, settings.format);
         if (Number.isFinite(settings.quality)) writeSetting(STORAGE_KEYS.QUALITY, settings.quality);
         if (settings.scaleMode) writeSetting(STORAGE_KEYS.SCALE, settings.scaleMode);
+        if (IMAGE_LAYOUTS.some(item => item.id === settings.layout)) writeSetting(STORAGE_KEYS.LAYOUT, settings.layout);
     }
 
     // ==========================================================
@@ -730,6 +740,84 @@
                 }
             }
 
+            #${OVERLAY_ID} .x-expand-toolbar {
+                max-block-size: 45dvh !important;
+                overflow: auto !important;
+                overscroll-behavior: contain !important;
+            }
+            #${OVERLAY_ID} .x-selection-group,
+            #${OVERLAY_ID} .x-layout-group {
+                min-inline-size: 0;
+                margin: 0;
+                padding: 0;
+                border: 0;
+            }
+            #${OVERLAY_ID} .x-selection-group { flex: 1 0 100%; }
+            #${OVERLAY_ID} legend { padding: 0 0 6px; font-size: 13px; color: #535b62; }
+            #${OVERLAY_ID} .x-selection-row,
+            #${OVERLAY_ID} .x-layout-options { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+            #${OVERLAY_ID} .x-selection-choice { position: relative; display: inline-flex; flex: 0 0 auto; }
+            #${OVERLAY_ID} .x-selection-check {
+                appearance: none;
+                inline-size: 44px;
+                block-size: 44px;
+                margin: 0;
+                border: 1px solid #858b91;
+                border-radius: 4px;
+                background: #fff;
+                cursor: pointer;
+            }
+            #${OVERLAY_ID} .x-selection-check:checked { border-color: #32729b; background: #eaf3fa; }
+            #${OVERLAY_ID} .x-selection-choice label {
+                position: absolute; inset: 0; display: grid; place-content: center;
+                color: #30373d; font-size: 13px; font-variant-numeric: tabular-nums;
+                cursor: pointer; pointer-events: none;
+            }
+            #${OVERLAY_ID} .x-selection-choice label::after {
+                content: '✓'; position: absolute; inset-block-start: 1px; inset-inline-end: 3px;
+                font-size: 10px; visibility: hidden;
+            }
+            #${OVERLAY_ID} .x-selection-check:checked + label::after { visibility: visible; }
+            #${OVERLAY_ID} .x-selection-row > button {
+                min-block-size: 36px; padding: 6px 10px; border: 1px solid #858b91;
+                border-radius: 4px; background: #fff; color: #30373d; cursor: pointer; font: inherit;
+            }
+            #${OVERLAY_ID} .x-selection-summary { color: #535b62; font-size: 13px; margin-inline-start: 6px; }
+            #${OVERLAY_ID} .x-layout-choice { display: inline-flex; align-items: center; min-block-size: 44px; gap: 4px; padding-inline-end: 8px; }
+            #${OVERLAY_ID} .x-layout-choice input { accent-color: #32729b; }
+            #${OVERLAY_ID} .x-layout-choice label { cursor: pointer; font-size: 13px; }
+            #${OVERLAY_ID} .x-preview-stage { position: relative; margin-inline: auto; background: #fff; }
+            #${OVERLAY_ID} .x-preview-stage .x-preview-item { position: absolute; }
+            #${OVERLAY_ID} .x-preview-item {
+                display: block; margin: 0; padding: 0; border: 0; background: #fff; color: #30373d;
+                box-sizing: border-box; cursor: pointer; isolation: isolate;
+            }
+            #${OVERLAY_ID} .x-preview-item[aria-pressed="true"]::after {
+                content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+                border: 1px solid #5b9bc5;
+                box-shadow: inset 0 0 0 1px rgba(255,255,255,.75), 0 0 4px rgba(80,145,190,.32);
+            }
+            #${OVERLAY_ID} .x-preview-item img { display: block; inline-size: 100%; block-size: 100%; object-fit: contain; }
+            #${OVERLAY_ID} .x-preview-number {
+                position: absolute; inset-block-start: 5px; inset-inline-start: 5px;
+                background: #fff; color: #30373d; border: 1px solid #858b91; border-radius: 3px;
+                padding: 1px 5px; font-size: 12px; pointer-events: none; z-index: 2;
+            }
+            #${OVERLAY_ID} .x-preview-empty { margin: 32px 0; color: #535b62; text-align: center; }
+            #${OVERLAY_ID} .x-unselected { margin-block-start: 24px; }
+            #${OVERLAY_ID} .x-unselected h3 { font: 500 13px/1.5 system-ui, sans-serif; color: #535b62; margin: 0 0 10px; }
+            #${OVERLAY_ID} .x-unselected-images { display: flex; flex-wrap: wrap; gap: 10px; }
+            #${OVERLAY_ID} .x-unselected .x-preview-item { inline-size: 110px; block-size: 110px; border: 1px solid #a1a7ad; }
+            #${OVERLAY_ID} .x-selection-check:disabled,
+            #${OVERLAY_ID} .x-layout-choice input:disabled,
+            #${OVERLAY_ID} .x-selection-row > button:disabled { opacity: .5; cursor: default; }
+            #${OVERLAY_ID} [hidden] { display: none !important; }
+            @media (forced-colors: active) {
+                #${OVERLAY_ID} .x-selection-check { border-color: ButtonText; background: Canvas; }
+                #${OVERLAY_ID} .x-selection-check:checked { border: 2px solid Highlight; }
+                #${OVERLAY_ID} .x-preview-item[aria-pressed="true"]::after { border-color: Highlight; box-shadow: none; }
+            }
+
         `;
         document.head.appendChild(style);
     }
@@ -909,72 +997,112 @@
     }
 
     async function loadAllImages(urls, onProgress) {
-        const bitmaps = [];
-        let totalWidth = 0;
-        let maxHeight = 0;
-        try {
-            for (let i = 0; i < urls.length; i++) {
-                onProgress?.(`正在下载原图（${i + 1}/${urls.length}）`);
-                const blob = await gmRequest(urls[i]);
-                const bitmap = await blobToBitmap(blob);
-                bitmaps.push(bitmap);
-                totalWidth += bitmap.width;
-                maxHeight = Math.max(maxHeight, bitmap.height);
+        const sources = [];
+        const sizes = [];
+        for (let i = 0; i < urls.length; i++) {
+            onProgress?.(`正在下载原图（${i + 1}/${urls.length}）`);
+            const blob = await gmRequest(urls[i]);
+            const bitmap = await blobToBitmap(blob);
+            try {
+                sizes.push({ width: bitmap.width, height: bitmap.height });
+                sources.push(blob);
+            } finally {
+                releaseBitmaps([bitmap]);
             }
-            return { bitmaps, totalWidth, maxHeight };
-        } catch (error) {
-            releaseBitmaps(bitmaps);
-            throw error;
         }
+        return { sources, sizes };
     }
 
-    // 无论绘制或编码是否成功，都释放图片和画布资源。
+    // 预览和导出共用同一组坐标，保留原图比例和帖子顺序。
+    function planImageLayout(sizes, layout = 'horizontal') {
+        if (!sizes.length) throw new Error('请至少选择 1 张图片');
+        if (sizes.some(size => !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0)) {
+            throw new Error('无法读取图片尺寸，请重新打开预览');
+        }
+        const placements = [];
+        if (layout === 'horizontal' || layout === 'vertical') {
+            let offset = 0;
+            let cross = 0;
+            for (const size of sizes) {
+                const horizontal = layout === 'horizontal';
+                placements.push({ x: horizontal ? offset : 0, y: horizontal ? 0 : offset, width: size.width, height: size.height });
+                offset += horizontal ? size.width : size.height;
+                cross = Math.max(cross, horizontal ? size.height : size.width);
+            }
+            return { width: layout === 'horizontal' ? offset : cross, height: layout === 'horizontal' ? cross : offset, placements };
+        }
+        const columns = Math.min(layout === 'grid-3' ? 3 : 2, sizes.length);
+        const cellWidth = Math.max(...sizes.map(size => size.width));
+        let y = 0;
+        for (let start = 0; start < sizes.length; start += columns) {
+            const row = sizes.slice(start, start + columns);
+            const rowHeight = Math.max(...row.map(size => size.height));
+            row.forEach((size, column) => placements.push({
+                x: column * cellWidth + (cellWidth - size.width) / 2,
+                y, width: size.width, height: size.height
+            }));
+            y += rowHeight;
+        }
+        return { width: cellWidth * columns, height: y, placements };
+    }
+
+    function scaleImageLayout(plan, scaleMode = '1') {
+        const scale = scaleMode === 'max-1440' ? Math.min(1, 1440 / plan.height)
+            : scaleMode === 'max-1080' ? Math.min(1, 1080 / plan.height)
+            : Number.parseFloat(scaleMode) || 1;
+        return {
+            width: Math.max(1, Math.round(plan.width * scale)),
+            height: Math.max(1, Math.round(plan.height * scale)),
+            scale,
+            placements: plan.placements.map(item => {
+                const x = Math.round(item.x * scale);
+                const y = Math.round(item.y * scale);
+                return { x, y, width: Math.round((item.x + item.width) * scale) - x, height: Math.round((item.y + item.height) * scale) - y };
+            })
+        };
+    }
+
+    function selectedImageUrls(images, selected) {
+        return images.filter((_, index) => selected.has(index));
+    }
+
+    // 失败和成功路径都释放已解码图片；只下载本次选中的图片。
     async function combineImages(urls, options, onProgress) {
-        const { format, quality, scaleMode } = options;
-        const { bitmaps, totalWidth, maxHeight } = await loadAllImages(urls, onProgress);
+        if (!urls.length) throw new Error('请至少选择 1 张图片');
+        const { format, quality, scaleMode, layout = 'horizontal' } = options;
+        const { sources, sizes } = await loadAllImages(urls, onProgress);
         let canvas;
         try {
-            let scale = 1;
-            if (scaleMode === 'max-1440') {
-                scale = Math.min(1, 1440 / maxHeight);
-            } else if (scaleMode === 'max-1080') {
-                scale = Math.min(1, 1080 / maxHeight);
-            } else {
-                scale = Number.parseFloat(scaleMode) || 1;
+            const plan = scaleImageLayout(planImageLayout(sizes, layout), scaleMode);
+            if (plan.width > 32767 || plan.height > 32767 || plan.width * plan.height > 64000000) {
+                throw new Error(`图片尺寸为 ${plan.width}×${plan.height}，请减少选择或降低尺寸`);
             }
-            const finalWidth = Math.round(totalWidth * scale);
-            const finalHeight = Math.round(maxHeight * scale);
-            const MAX_CANVAS_SIZE = 32767;
-            if (finalWidth < 1 || finalHeight < 1 || finalWidth > MAX_CANVAS_SIZE || finalHeight > MAX_CANVAS_SIZE) {
-                throw new Error(`无法导出 ${finalWidth}×${finalHeight} 图片，请降低尺寸后重试`);
-            }
-
             canvas = document.createElement('canvas');
-            canvas.width = finalWidth;
-            canvas.height = finalHeight;
+            canvas.width = plan.width;
+            canvas.height = plan.height;
             const ctx = canvas.getContext('2d');
             if (!ctx) throw new Error('无法创建画布，请降低尺寸后重试');
-            ctx.imageSmoothingEnabled = scale < 1;
-            if (scale < 1) ctx.imageSmoothingQuality = 'high';
+            ctx.imageSmoothingEnabled = plan.scale < 1;
+            if (plan.scale < 1) ctx.imageSmoothingQuality = 'high';
             if (format === 'image/jpeg') {
                 ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, finalWidth, finalHeight);
+                ctx.fillRect(0, 0, plan.width, plan.height);
             }
-
-            let sourceX = 0;
             let deadline = performance.now() + 8;
-            for (const bitmap of bitmaps) {
-                const left = Math.round(sourceX * scale);
-                sourceX += bitmap.width;
-                const right = Math.round(sourceX * scale);
-                const drawHeight = Math.round(bitmap.height * scale);
-                ctx.drawImage(bitmap, left, 0, right - left, drawHeight);
+            for (let index = 0; index < sources.length; index++) {
+                const item = plan.placements[index];
+                const bitmap = await blobToBitmap(sources[index]);
+                try {
+                    ctx.drawImage(bitmap, item.x, item.y, item.width, item.height);
+                } finally {
+                    releaseBitmaps([bitmap]);
+                    sources[index] = null;
+                }
                 if (performance.now() >= deadline) {
                     await yieldToMain();
                     deadline = performance.now() + 8;
                 }
             }
-
             const fmtName = format === 'image/jpeg' ? 'JPEG' : format === 'image/webp' ? 'WebP' : 'PNG';
             onProgress?.(`正在编码 ${fmtName} 图片`);
             const blob = await new Promise((resolve, reject) => {
@@ -983,15 +1111,13 @@
                     else reject(new Error('图片编码失败，请降低尺寸后重试'));
                 }, format, quality);
             });
-            return { blob, width: finalWidth, height: finalHeight, size: blob.size, format: blob.type || format };
+            return { blob, width: plan.width, height: plan.height, size: blob.size, format: blob.type || format };
         } finally {
-            releaseBitmaps(bitmaps);
-            if (canvas) {
-                canvas.width = 1;
-                canvas.height = 1;
-            }
+            sources.length = 0;
+            if (canvas) { canvas.width = 1; canvas.height = 1; }
         }
     }
+
 
     // ==========================================================
     // 写入系统剪贴板 (带安全回退)
@@ -1066,6 +1192,7 @@
         }
         const closeButton = dialog.querySelector('.x-expand-close');
         if (busy) closeButton.focus({ preventScroll: true });
+        statusEl._updateControls?.();
     }
 
     function hideStatus(statusEl, delay = 0) {
@@ -1081,7 +1208,7 @@
     // 复制操作处理
     // ==========================================================
     async function handleCopy(urls, copyBtn, statusEl, getOptions) {
-        if (copyBtn.disabled || statusEl._exporting) return;
+        if (copyBtn.disabled || statusEl._exporting || !urls.length) return;
         setExportBusy(statusEl, true);
 
         try {
@@ -1113,13 +1240,13 @@
             }
 
             setTimeout(() => {
-                copyBtn.textContent = '复制整图';
+                copyBtn.textContent = '复制所选';
                 hideStatus(statusEl, 2800);
             }, 1800);
 
         } catch (error) {
             console.error('[X轮播展开] 复制失败:', error);
-            copyBtn.textContent = '复制整图';
+            copyBtn.textContent = '复制所选';
             showStatus(statusEl, `复制失败：${error?.message || '未知错误'}`);
             hideStatus(statusEl, 4000);
         } finally {
@@ -1131,7 +1258,7 @@
     // 下载操作处理
     // ==========================================================
     async function handleDownload(urls, downloadBtn, statusEl, getOptions) {
-        if (downloadBtn.disabled || statusEl._exporting) return;
+        if (downloadBtn.disabled || statusEl._exporting || !urls.length) return;
         setExportBusy(statusEl, true);
 
         try {
@@ -1152,13 +1279,13 @@
             showStatus(statusEl, `已保存： ${filename} (${formatBytes(result.size)})`);
 
             setTimeout(() => {
-                downloadBtn.textContent = '下载';
+                downloadBtn.textContent = '下载所选';
                 hideStatus(statusEl, 2500);
             }, 1800);
 
         } catch (error) {
             console.error('[X轮播展开] 下载失败:', error);
-            downloadBtn.textContent = '下载';
+            downloadBtn.textContent = '下载所选';
             showStatus(statusEl, `下载失败：${error?.message || '未知错误'}`);
             hideStatus(statusEl, 4000);
         } finally {
@@ -1171,26 +1298,19 @@
     // ==========================================================
     function openViewer(images) {
         closeViewer();
-
         const stored = getStoredSettings();
-
+        const selected = new Set(images.slice(0, 4).map((_, index) => index));
         const overlay = document.createElement('dialog');
         overlay.id = OVERLAY_ID;
         overlay.lang = 'zh-CN';
         overlay.setAttribute('aria-labelledby', `${OVERLAY_ID}_title`);
         overlay.setAttribute('closedby', 'any');
-        overlay.addEventListener('close', () => overlay.remove(), { once: true });
+        let renderFrame = null;
 
-        // ------------------------------------------------------
-        // Toolbar 结构
-        // ------------------------------------------------------
         const toolbar = document.createElement('div');
         toolbar.className = 'x-expand-toolbar';
-
-        // 标题区
         const leftBox = document.createElement('div');
         leftBox.className = 'x-toolbar-left';
-
         const title = document.createElement('h2');
         title.id = `${OVERLAY_ID}_title`;
         title.className = 'x-expand-title';
@@ -1198,119 +1318,163 @@
         const count = document.createElement('span');
         count.className = 'x-image-count';
         count.textContent = `${images.length} 张`;
-        leftBox.appendChild(count);
-        leftBox.prepend(title);
-
-        // 设置控制区
+        leftBox.append(title, count);
         const settingsBox = document.createElement('div');
         settingsBox.className = 'x-toolbar-settings';
 
-        // 1. 复制格式选择
-        const fmtGroup = document.createElement('div');
-        fmtGroup.className = 'x-ctrl-group';
-        fmtGroup.innerHTML = `
-            <label for="x-format-select">格式：</label>
-            <select class="x-select" id="x-format-select" title="选择复制或导出的图片格式">
-                <option value="image/jpeg">JPEG</option>
-                <option value="image/png">PNG</option>
-                <option value="image/webp">WebP</option>
-            </select>
-        `;
-        const fmtSelect = fmtGroup.querySelector('#x-format-select');
-        fmtSelect.value = stored.format;
-
-        // 2. 压缩质量滑块
+        function makeSelect(id, text, options, value) {
+            const group = document.createElement('div');
+            group.className = 'x-ctrl-group';
+            const label = document.createElement('label');
+            label.htmlFor = id;
+            label.textContent = text;
+            const select = document.createElement('select');
+            select.id = id;
+            select.className = 'x-select';
+            for (const [key, name] of options) {
+                const option = document.createElement('option');
+                option.value = key;
+                option.textContent = name;
+                select.append(option);
+            }
+            select.value = value;
+            group.append(label, select);
+            settingsBox.append(group);
+            return select;
+        }
+        const fmtSelect = makeSelect('x-format-select', '格式：', [['image/jpeg', 'JPEG'], ['image/png', 'PNG'], ['image/webp', 'WebP']], stored.format);
         const qualityGroup = document.createElement('div');
         qualityGroup.className = 'x-ctrl-group';
-        qualityGroup.innerHTML = `
-            <label for="x-quality-slider">质量：</label>
-            <div class="x-slider-container">
-                <input type="range" class="x-slider" id="x-quality-slider" min="30" max="100" step="5" value="${Math.round(stored.quality * 100)}" title="压缩等级：数值越高画质越好，体积也越大">
-                <span class="x-quality-val" id="x-quality-label">${Math.round(stored.quality * 100)}%</span>
-            </div>
-        `;
-        const qualitySlider = qualityGroup.querySelector('#x-quality-slider');
-        const qualityLabel = qualityGroup.querySelector('#x-quality-label');
+        const qualityName = document.createElement('label');
+        qualityName.htmlFor = 'x-quality-slider';
+        qualityName.textContent = '质量：';
+        const qualitySlider = document.createElement('input');
+        qualitySlider.type = 'range';
+        qualitySlider.id = 'x-quality-slider';
+        qualitySlider.className = 'x-slider';
+        qualitySlider.min = '30';
+        qualitySlider.max = '100';
+        qualitySlider.step = '5';
+        qualitySlider.value = String(Math.round(stored.quality * 100));
+        const qualityLabel = document.createElement('span');
+        qualityLabel.className = 'x-quality-val';
+        qualityGroup.append(qualityName, qualitySlider, qualityLabel);
+        settingsBox.append(qualityGroup);
+        const scaleSelect = makeSelect('x-scale-select', '尺寸：', [
+            ['1', '100%（原图）'], ['0.75', '75%'], ['0.5', '50%'], ['0.25', '25%'],
+            ['max-1440', '限高 1440 px'], ['max-1080', '限高 1080 px']
+        ], stored.scaleMode);
 
-        // 3. 分辨率缩放
-        const scaleGroup = document.createElement('div');
-        scaleGroup.className = 'x-ctrl-group';
-        scaleGroup.innerHTML = `
-            <label for="x-scale-select">尺寸：</label>
-            <select class="x-select" id="x-scale-select" title="导出图片相对原图的尺寸">
-                <option value="1">100%（原图）</option>
-                <option value="0.75">75%</option>
-                <option value="0.5">50%</option>
-                <option value="max-1440">限高 1440p</option>
-                <option value="max-1080">限高 1080p</option>
-            </select>
-        `;
-        const scaleSelect = scaleGroup.querySelector('#x-scale-select');
-        scaleSelect.value = stored.scaleMode;
-
-        // 4. 预测文件大小指示器
+        const layoutGroup = document.createElement('fieldset');
+        layoutGroup.className = 'x-layout-group';
+        const layoutLegend = document.createElement('legend');
+        layoutLegend.textContent = '排版';
+        const layoutOptions = document.createElement('div');
+        layoutOptions.className = 'x-layout-options';
+        const layoutInputs = IMAGE_LAYOUTS.map(mode => {
+            const choice = document.createElement('div');
+            choice.className = 'x-layout-choice';
+            const input = document.createElement('input');
+            input.type = 'radio';
+            input.name = 'x-image-layout';
+            input.id = `x-layout-${mode.id}`;
+            input.value = mode.id;
+            input.checked = mode.id === stored.layout;
+            const label = document.createElement('label');
+            label.htmlFor = input.id;
+            label.textContent = mode.label;
+            choice.append(input, label);
+            layoutOptions.append(choice);
+            return input;
+        });
+        layoutGroup.append(layoutLegend, layoutOptions);
+        settingsBox.append(layoutGroup);
         const sizeBadge = document.createElement('div');
-        sizeBadge.className = 'x-size-badge loading';
-        sizeBadge.textContent = '正在读取图片尺寸';
+        sizeBadge.className = 'x-size-badge';
+        settingsBox.append(sizeBadge);
 
-        settingsBox.appendChild(fmtGroup);
-        settingsBox.appendChild(qualityGroup);
-        settingsBox.appendChild(scaleGroup);
-        settingsBox.appendChild(sizeBadge);
-
-        // 操作区 (复制 / 下载 / 关闭)
+        function makeButton(text, className) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = text;
+            button.className = className;
+            return button;
+        }
         const actions = document.createElement('div');
         actions.className = 'x-expand-actions';
-
-        const copyButton = document.createElement('button');
-        copyButton.type = 'button';
-        copyButton.className = 'x-copy-button';
-        copyButton.textContent = '复制整图';
-        copyButton.title = '拼接整套轮播图并复制到系统剪贴板';
-
-        const downloadButton = document.createElement('button');
-        downloadButton.type = 'button';
-        downloadButton.className = 'x-download-button';
-        downloadButton.textContent = '下载';
-        downloadButton.title = '直接将拼接图保存到本地文件';
-
-        const closeButton = document.createElement('button');
-        closeButton.type = 'button';
-        closeButton.className = 'x-expand-close';
-        closeButton.textContent = '关闭';
-        closeButton.setAttribute('aria-label', '关闭');
+        const copyButton = makeButton('复制所选', 'x-copy-button');
+        const downloadButton = makeButton('下载所选', 'x-download-button');
+        const closeButton = makeButton('关闭', 'x-expand-close');
         closeButton.autofocus = true;
+        actions.append(copyButton, downloadButton, closeButton);
+        toolbar.append(leftBox, settingsBox, actions);
 
-        actions.appendChild(copyButton);
-        actions.appendChild(downloadButton);
-        actions.appendChild(closeButton);
+        const selectionGroup = document.createElement('fieldset');
+        selectionGroup.className = 'x-selection-group';
+        const legend = document.createElement('legend');
+        legend.textContent = '选择图片';
+        const selectionRow = document.createElement('div');
+        selectionRow.className = 'x-selection-row';
+        const checks = images.map((_, index) => {
+            const choice = document.createElement('div');
+            choice.className = 'x-selection-choice';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.className = 'x-selection-check';
+            input.id = `x-image-select-${index}`;
+            input.checked = selected.has(index);
+            const label = document.createElement('label');
+            label.htmlFor = input.id;
+            label.textContent = String(index + 1);
+            input.addEventListener('change', () => toggleSelection(index, input.checked));
+            choice.append(input, label);
+            selectionRow.append(choice);
+            return input;
+        });
+        const selectAll = makeButton('全选', 'x-select-all');
+        const clearAll = makeButton('清空', 'x-clear-all');
+        const summary = document.createElement('span');
+        summary.className = 'x-selection-summary';
+        selectionRow.append(selectAll, clearAll, summary);
+        selectionGroup.append(legend, selectionRow);
+        toolbar.append(selectionGroup);
 
-        toolbar.appendChild(leftBox);
-        toolbar.appendChild(settingsBox);
-        toolbar.appendChild(actions);
-
-        // ------------------------------------------------------
-        // 图片列表展示
-        // ------------------------------------------------------
-        const content = document.createElement('div');
-        content.className = 'x-expand-content';
         const viewport = document.createElement('div');
         viewport.className = 'x-expand-viewport';
-        viewport.appendChild(content);
+        const stage = document.createElement('div');
+        stage.className = 'x-preview-stage';
+        const empty = document.createElement('p');
+        empty.className = 'x-preview-empty';
+        empty.textContent = '选择图片后可复制或下载';
+        const unused = document.createElement('section');
+        unused.className = 'x-unselected';
+        const unusedTitle = document.createElement('h3');
+        unusedTitle.textContent = '未选图片';
+        const unusedImages = document.createElement('div');
+        unusedImages.className = 'x-unselected-images';
+        unused.append(unusedTitle, unusedImages);
+        viewport.append(stage, empty, unused);
 
-        const imgElements = [];
-        for (let i = 0; i < images.length; i++) {
+        const entries = images.map((url, index) => {
+            const button = makeButton('', 'x-preview-item');
+            button.dataset.index = String(index);
+            button.setAttribute('aria-label', `图片 ${index + 1}`);
             const img = document.createElement('img');
-            img.className = 'x-expand-image';
-            img.alt = `图片 ${i + 1}`;
+            img.alt = '';
             img.decoding = 'async';
-            img.loading = i === 0 ? 'eager' : 'lazy';
-            img.src = images[i];
-            content.appendChild(img);
-            imgElements.push(img);
-        }
+            img.loading = selected.has(index) ? 'eager' : 'lazy';
+            img.addEventListener('load', scheduleRender);
+            img.addEventListener('error', scheduleRender);
+            img.src = url;
+            const number = document.createElement('span');
+            number.className = 'x-preview-number';
+            number.setAttribute('aria-hidden', 'true');
+            number.textContent = String(index + 1);
+            button.append(img, number);
+            button.addEventListener('click', () => toggleSelection(index, !selected.has(index)));
+            return { button, img };
+        });
 
-        // 状态栏
         const status = document.createElement('div');
         status.className = 'x-copy-status';
         status.setAttribute('role', 'status');
@@ -1320,177 +1484,130 @@
         progress.setAttribute('aria-label', '生成图片');
         progress.hidden = true;
         status._progress = progress;
-        toolbar.appendChild(progress);
-
-        overlay.appendChild(toolbar);
-        overlay.appendChild(viewport);
-        overlay.appendChild(status);
-        document.body.appendChild(overlay);
-
+        status._updateControls = updateControls;
+        toolbar.append(progress);
+        overlay.append(toolbar, viewport, status);
+        document.body.append(overlay);
         overlay.showModal();
 
-        // ------------------------------------------------------
-        // 获取当前用户设置与预测大小核心算法
-        // ------------------------------------------------------
         function getCurrentOptions() {
-            return {
-                format: fmtSelect.value,
-                quality: parseInt(qualitySlider.value, 10) / 100,
-                scaleMode: scaleSelect.value
+            return { format: fmtSelect.value, quality: Number(qualitySlider.value) / 100,
+                scaleMode: scaleSelect.value, layout: layoutInputs.find(input => input.checked).value };
+        }
+        function updateControls() {
+            const busy = Boolean(status._exporting);
+            copyButton.disabled = downloadButton.disabled = busy || !selected.size;
+            selectionGroup.disabled = layoutGroup.disabled = busy;
+            fmtSelect.disabled = scaleSelect.disabled = busy;
+            qualitySlider.disabled = busy || fmtSelect.value === 'image/png';
+            selectAll.disabled = busy || selected.size === images.length;
+            clearAll.disabled = busy || !selected.size;
+            entries.forEach(entry => { entry.button.disabled = busy; });
+        }
+        function toggleSelection(index, checked) {
+            if (status._exporting) return;
+            if (checked) selected.add(index); else selected.delete(index);
+            checks[index].checked = checked;
+            if (checked) entries[index].img.loading = 'eager';
+            render();
+        }
+        function scheduleRender() {
+            if (!overlay.isConnected || renderFrame !== null) return;
+            renderFrame = requestAnimationFrame(() => { renderFrame = null; render(); });
+        }
+        function render() {
+            if (!overlay.isConnected) return;
+            const options = getCurrentOptions();
+            const indexes = images.map((_, index) => index).filter(index => selected.has(index));
+            summary.textContent = `已选 ${indexes.length} / ${images.length} 张`;
+            qualityLabel.textContent = options.format === 'image/png' ? '无损' : `${Math.round(options.quality * 100)}%`;
+            empty.hidden = indexes.length > 0;
+            stage.hidden = !indexes.length;
+            unused.hidden = indexes.length === images.length;
+            const active = document.activeElement;
+            let selectedPosition = 0;
+            let unusedPosition = 0;
+            entries.forEach((entry, index) => {
+                const chosen = selected.has(index);
+                entry.button.setAttribute('aria-pressed', String(chosen));
+                entry.button.setAttribute('aria-description', chosen ? '已选；点击取消' : '未选；点击加入');
+                const parent = chosen ? stage : unusedImages;
+                const position = chosen ? selectedPosition++ : unusedPosition++;
+                if (!chosen) entry.button.removeAttribute('style');
+                const sibling = parent.children[position] || null;
+                if (sibling !== entry.button) parent.insertBefore(entry.button, sibling);
+            });
+            if (active?.classList.contains('x-preview-item') && active.isConnected) active.focus({ preventScroll: true });
+            updateControls();
+            if (!indexes.length) { sizeBadge.textContent = '未选择图片'; stage.style.width = stage.style.height = '0px'; return; }
+            const sizes = indexes.map(index => ({ width: entries[index].img.naturalWidth || 1000, height: entries[index].img.naturalHeight || 1000 }));
+            const plan = planImageLayout(sizes, options.layout);
+            const usableWidth = Math.max(1, viewport.clientWidth - (innerWidth < 720 ? 24 : 48));
+            const usableHeight = Math.max(160, viewport.clientHeight - 48);
+            const scale = options.layout === 'horizontal'
+                ? Math.min(1, usableHeight / plan.height)
+                : Math.min(1, Math.min(usableWidth, 1200) / plan.width);
+            stage.style.width = `${plan.width * scale}px`;
+            stage.style.height = `${plan.height * scale}px`;
+            plan.placements.forEach((item, offset) => {
+                const style = entries[indexes[offset]].button.style;
+                style.left = `${item.x * scale}px`; style.top = `${item.y * scale}px`;
+                style.width = `${item.width * scale}px`; style.height = `${item.height * scale}px`;
+            });
+            if (indexes.some(index => !entries[index].img.naturalWidth)) {
+                sizeBadge.textContent = '正在读取已选图片尺寸'; return;
+            }
+            const output = scaleImageLayout(plan, options.scaleMode);
+            const factor = options.format === 'image/png' ? 1.35 : options.format === 'image/webp'
+                ? 0.03 + 0.22 * Math.pow(options.quality, 2.5) : 0.04 + 0.30 * Math.pow(options.quality, 2.4);
+            const bytes = output.width * output.height * factor;
+            sizeBadge.textContent = `预估约 ${formatBytes(bytes)} · ${output.width}×${output.height}`;
+            sizeBadge.className = 'x-size-badge';
+            if (output.width > 32767 || output.height > 32767 || output.width * output.height > 64000000) {
+                sizeBadge.textContent += ' · 请减少选择或降低尺寸';
+                sizeBadge.classList.add('warning');
+            }
+            sizeBadge.title = '文件大小为估算值，各平台的发送限制可能不同';
+        }
+        selectAll.addEventListener('click', () => {
+            images.forEach((_, index) => { selected.add(index); checks[index].checked = true; entries[index].img.loading = 'eager'; });
+            render();
+        });
+        clearAll.addEventListener('click', () => { selected.clear(); checks.forEach(input => { input.checked = false; }); render(); });
+        for (const control of [fmtSelect, qualitySlider, scaleSelect, ...layoutInputs]) {
+            control.addEventListener(control === qualitySlider ? 'input' : 'change', () => { saveStoredSettings(getCurrentOptions()); render(); });
+        }
+        copyButton.addEventListener('click', () => handleCopy(selectedImageUrls(images, selected), copyButton, status, getCurrentOptions));
+        downloadButton.addEventListener('click', () => handleDownload(selectedImageUrls(images, selected), downloadButton, status, getCurrentOptions));
+        closeButton.addEventListener('click', closeViewer);
+        overlay.addEventListener('click', event => event.stopPropagation());
+        if (!('closedBy' in HTMLDialogElement.prototype)) {
+            const outside = event => {
+                const rect = overlay.getBoundingClientRect();
+                return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
             };
+            let pressedOutside = false;
+            overlay.addEventListener('pointerdown', event => { pressedOutside = outside(event); });
+            overlay.addEventListener('pointerup', event => { if (pressedOutside && outside(event)) overlay.close(); });
         }
-
-        function updatePrediction() {
-            const opts = getCurrentOptions();
-
-            // 滑块交互状态调整
-            if (opts.format === 'image/png') {
-                qualitySlider.disabled = true;
-                qualityLabel.textContent = '无损';
-            } else {
-                qualitySlider.disabled = false;
-                qualityLabel.textContent = `${Math.round(opts.quality * 100)}%`;
-            }
-
-            // 计算已载入的图片宽高
-            let totalW = 0;
-            let maxH = 0;
-            let loadedCount = 0;
-
-            for (const img of imgElements) {
-                if (img.naturalWidth && img.naturalHeight) {
-                    totalW += img.naturalWidth;
-                    maxH = Math.max(maxH, img.naturalHeight);
-                    loadedCount++;
-                }
-            }
-
-            if (loadedCount === 0) {
-                sizeBadge.textContent = '正在读取图片尺寸';
-                sizeBadge.className = 'x-size-badge loading';
-                return;
-            }
-
-            // 部分加载时按比例预估全图尺寸
-            const estTotalW = loadedCount === imgElements.length ? totalW : Math.round((totalW / loadedCount) * imgElements.length);
-            const estMaxH = maxH;
-
-            // 缩放计算
-            let scale = 1.0;
-            if (opts.scaleMode === 'max-1440') {
-                if (estMaxH > 1440) scale = 1440 / estMaxH;
-            } else if (opts.scaleMode === 'max-1080') {
-                if (estMaxH > 1080) scale = 1080 / estMaxH;
-            } else {
-                scale = parseFloat(opts.scaleMode) || 1.0;
-            }
-
-            const targetW = Math.round(estTotalW * scale);
-            const targetH = Math.round(estMaxH * scale);
-            const totalPixels = targetW * targetH;
-
-            // 各格式大小预测经验模型 (字节数)
-            let predictedBytes = 0;
-            if (opts.format === 'image/png') {
-                // PNG 在照片和插图上通常每个像素 1.25~1.5 字节
-                predictedBytes = totalPixels * 1.35;
-            } else if (opts.format === 'image/webp') {
-                predictedBytes = totalPixels * (0.03 + 0.22 * Math.pow(opts.quality, 2.5));
-            } else {
-                // JPEG: Q85 约为 0.24 字节/像素
-                predictedBytes = totalPixels * (0.04 + 0.30 * Math.pow(opts.quality, 2.4));
-            }
-
-            const formatted = formatBytes(predictedBytes);
-            const isLarge = opts.format === 'image/png' && predictedBytes > 15 * 1024 * 1024;
-
-            if (isLarge) {
-                sizeBadge.textContent = `预估约 ${formatted} · ${targetW}×${targetH}（预估超过 15 MB）`;
-                sizeBadge.className = 'x-size-badge warning';
-                sizeBadge.title = '预计超过 15 MB，可降低尺寸或选择 JPEG';
-            } else {
-                sizeBadge.textContent = `预估约 ${formatted} · ${targetW}×${targetH}`;
-                sizeBadge.className = 'x-size-badge';
-                sizeBadge.title = `当前参数下的预估图片体积约为 ${formatted}`;
-            }
-        }
-
-        // 监听图片加载完毕更新预测尺寸
-        for (const img of imgElements) {
-            if (img.complete && img.naturalWidth) {
-                updatePrediction();
-            } else {
-                img.addEventListener('load', updatePrediction, { once: true });
-            }
-        }
-
-        // 选项变动监听
-        fmtSelect.addEventListener('change', () => {
-            saveStoredSettings(getCurrentOptions());
-            updatePrediction();
-        });
-
-        qualitySlider.addEventListener('input', () => {
-            saveStoredSettings(getCurrentOptions());
-            updatePrediction();
-        });
-
-        scaleSelect.addEventListener('change', () => {
-            saveStoredSettings(getCurrentOptions());
-            updatePrediction();
-        });
-
-        // 初始更新一次
-        updatePrediction();
-
-        // ------------------------------------------------------
-        // 绑定按钮事件
-        // ------------------------------------------------------
-        copyButton.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            handleCopy(images, copyButton, status, getCurrentOptions);
-        });
-
-        downloadButton.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            handleDownload(images, downloadButton, status, getCurrentOptions);
-        });
-
-        closeButton.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            closeViewer();
-        });
-
-        overlay.addEventListener('click', event => {
-            event.stopPropagation();
-        });
-
-        // 仅把媒体区的普通鼠标滚轮转换为横向滚动。
-        content.addEventListener('wheel', event => {
-            if (event.ctrlKey || event.shiftKey || event.deltaX || !event.deltaY ||
+        viewport.addEventListener('wheel', event => {
+            if (getCurrentOptions().layout !== 'horizontal' || event.ctrlKey || event.shiftKey || event.deltaX || !event.deltaY ||
                 viewport.scrollWidth <= viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight + 1) return;
             const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientWidth : 1;
             const previous = viewport.scrollLeft;
             viewport.scrollLeft += event.deltaY * unit;
             if (viewport.scrollLeft !== previous) event.preventDefault();
         }, { passive: false });
-
-        if (!('closedBy' in HTMLDialogElement.prototype)) {
-            const outside = event => {
-                const rect = overlay.getBoundingClientRect();
-                return event.clientX < rect.left || event.clientX > rect.right ||
-                    event.clientY < rect.top || event.clientY > rect.bottom;
-            };
-            let pressedOutside = false;
-            overlay.addEventListener('pointerdown', event => { pressedOutside = outside(event); });
-            overlay.addEventListener('pointerup', event => {
-                if (pressedOutside && outside(event)) overlay.close();
-            });
-        }
+        const resize = new ResizeObserver(scheduleRender);
+        resize.observe(viewport);
+        overlay.addEventListener('close', () => {
+            resize.disconnect();
+            if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+            overlay.remove();
+        }, { once: true });
+        render();
     }
+
 
     // ==========================================================
     // 关闭查看器
