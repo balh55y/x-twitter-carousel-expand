@@ -178,7 +178,7 @@ test('20 photos use seven rows in a three-column grid and preserve order', async
 
 test('single selection yields the same dimensions in all layouts', () => {
     const { api } = harness();
-    for (const layout of ['horizontal','vertical','grid-2','grid-3']) {
+    for (const layout of ['horizontal','vertical','grid-2','grid-3','justified']) {
         const plan = api.planImageLayout([{width:800,height:600}],layout);
         assert.deepEqual([plan.width,plan.height],[800,600]);
     }
@@ -276,4 +276,110 @@ test('unreadable encoded output is rejected and canvas memory is released', asyn
     assert.equal(state.closed.length, 2);
     assert.equal(state.active, 0);
     assert.equal(state.canvas.width, 1);
+});
+
+
+function checkJustifiedLayout(api, sizes) {
+    const plan = api.planImageLayout(sizes, 'justified');
+    assert.equal(plan.placements.length, sizes.length);
+    const rows = [];
+    plan.placements.forEach((item, index) => {
+        assert.ok(Number.isFinite(item.x) && Number.isFinite(item.y));
+        assert.ok(item.width > 0 && item.height > 0);
+        assert.ok(Math.abs(item.width / item.height - sizes[index].width / sizes[index].height) < 1e-8);
+        if (!rows.length || rows.at(-1)[0].y !== item.y) rows.push([]);
+        rows.at(-1).push(item);
+    });
+    let bottom = 0;
+    for (const row of rows) {
+        assert.ok(Math.abs(row[0].y - bottom) < 1e-8);
+        assert.equal(row[0].x, 0);
+        let right = 0;
+        for (const item of row) {
+            assert.ok(Math.abs(item.x - right) < 1e-8);
+            assert.equal(item.height, row[0].height);
+            right = item.x + item.width;
+        }
+        assert.ok(Math.abs(right - plan.width) < 1e-8);
+        bottom = row[0].y + row[0].height;
+    }
+    assert.ok(Math.abs(bottom - plan.height) < 1e-8);
+    for (const scale of ['1', '0.75', '0.5', '0.25', 'max-1080', 'max-1440']) {
+        const output = api.scaleImageLayout(plan, scale);
+        let offset = 0;
+        let y = 0;
+        for (const row of rows) {
+            const tiles = output.placements.slice(offset, offset + row.length);
+            let right = 0;
+            for (const tile of tiles) {
+                assert.equal(tile.x, right);
+                assert.equal(tile.y, y);
+                assert.ok(tile.width > 0 && tile.height > 0);
+                right += tile.width;
+            }
+            assert.equal(right, output.width);
+            y += tiles[0].height;
+            offset += row.length;
+        }
+        assert.equal(y, output.height);
+    }
+    return { plan, rows };
+}
+
+test('smart layout fills every row, keeps aspect ratios and tiles at every output scale', () => {
+    const { api } = harness();
+    for (let count = 2; count <= 20; count++) {
+        const sizes = Array.from({ length: count }, (_, i) => ({ width: 450 + (i * 337) % 1400, height: 500 + (i * 487) % 1600 }));
+        checkJustifiedLayout(api, sizes);
+    }
+});
+
+test('smart layout balances an odd portrait selection instead of leaving an enlarged last tile', () => {
+    const { api } = harness();
+    const sizes = Array.from({ length: 7 }, () => ({ width: 800, height: 1200 }));
+    const { rows } = checkJustifiedLayout(api, sizes);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map(row => row.length).sort(), [3, 4]);
+});
+
+test('smart layout handles panoramas and tall images without cutting source content', () => {
+    const { api } = harness();
+    checkJustifiedLayout(api, [{width:4000,height:400}, {width:400,height:2400}, {width:1200,height:800}, {width:800,height:1200}, {width:1200,height:800}]);
+});
+
+test('smart layout uses typical source width rather than a panorama outlier', () => {
+    const { api } = harness();
+    const sizes = [{width:800,height:1200},{width:800,height:1200},{width:12000,height:800}];
+    const plan = api.planImageLayout(sizes, 'justified');
+    assert.equal(plan.width, 1600);
+});
+
+test('smart export preserves selected order and draws the same geometry used by preview', async () => {
+    const dimensions = { a:{width:800,height:1200}, b:{width:1200,height:800}, c:{width:700,height:1100}, d:{width:900,height:600}, e:{width:800,height:1200} };
+    const { api, state } = harness({ dimensions });
+    const urls = api.selectedImageUrls(['a','b','c','d','e'], new Set([4,0,2]));
+    const expected = api.scaleImageLayout(api.planImageLayout(Array.from(urls, url => dimensions[url]), 'justified'), '0.75');
+    const result = await api.combineImages(urls, {...options,scaleMode:'0.75',layout:'justified'});
+    assert.deepEqual(state.urls, ['a','c','e']);
+    assert.deepEqual([result.width,result.height], [expected.width,expected.height]);
+    assert.deepEqual(state.draws, Array.from(expected.placements, p => [p.x,p.y,p.width,p.height]));
+    assert.equal(state.active, 0);
+    assert.equal(state.maxActive, 1);
+});
+
+test('smart mode persists alongside existing fixed-column settings', () => {
+    const { api } = harness();
+    assert.equal(api.getStoredSettings().layout, 'horizontal');
+    for (const layout of ['grid-2','justified','grid-3']) {
+        api.saveStoredSettings({layout});
+        assert.equal(api.getStoredSettings().layout, layout);
+    }
+});
+
+test('smart mode rejects empty and invalid dimensions before partitioning', () => {
+    const { api } = harness();
+    assert.throws(() => api.planImageLayout([], 'justified'), /至少选择/);
+    for (const size of [{width:0,height:1},{width:1,height:-1},{width:NaN,height:4}]) {
+        assert.throws(() => api.planImageLayout([size], 'justified'), /无法读取图片尺寸/);
+    }
 });

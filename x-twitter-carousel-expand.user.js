@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.4.1
-// @description  选择 X 帖子图片，按横向、纵向或网格排版复制和下载；支持画质、尺寸和页面宽度设置
+// @version      6.5.0
+// @description  选择 X 帖子图片，支持智能排版、横向、纵向和网格，复制和下载时可设置画质与尺寸
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -19,7 +19,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.4.1';
+    const VERSION = '6.5.0';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
@@ -29,7 +29,8 @@
         { id: 'horizontal', label: '横向' },
         { id: 'vertical', label: '纵向' },
         { id: 'grid-2', label: '两列' },
-        { id: 'grid-3', label: '三列' }
+        { id: 'grid-3', label: '三列' },
+        { id: 'justified', label: '智能排版' }
     ];
     const WIDTH_MODES = [
         { id: 'standard', label: '标准', width: '600px' },
@@ -1013,12 +1014,58 @@
         return { sources, sizes };
     }
 
+    function planJustifiedLayout(sizes) {
+        if (sizes.length === 1) {
+            return { ...sizes[0], placements: [{ x: 0, y: 0, ...sizes[0] }] };
+        }
+        // Use the typical source width so one panorama cannot enlarge the whole collage.
+        const widths = sizes.map(size => size.width).sort((a, b) => a - b);
+        const middle = Math.floor(widths.length / 2);
+        const medianWidth = widths.length % 2 ? widths[middle] : (widths[middle - 1] + widths[middle]) / 2;
+        const width = Math.max(1, Math.round(medianWidth * 2));
+        const targetHeight = width / 2;
+        const ratios = sizes.map(size => size.width / size.height);
+        const costs = Array(sizes.length + 1).fill(Infinity);
+        const breaks = [];
+        costs[sizes.length] = 0;
+        // Score complete partitions so the last row can share images with earlier rows.
+        for (let start = sizes.length - 1; start >= 0; start--) {
+            let ratioSum = 0;
+            for (let end = start + 1; end <= sizes.length; end++) {
+                ratioSum += ratios[end - 1];
+                const height = width / ratioSum;
+                const cost = (end - start) * (height / targetHeight - 1) ** 2 + costs[end];
+                if (cost < costs[start]) {
+                    costs[start] = cost;
+                    breaks[start] = end;
+                }
+            }
+        }
+        const placements = [];
+        let y = 0;
+        for (let start = 0; start < sizes.length;) {
+            const end = breaks[start];
+            const ratioSum = ratios.slice(start, end).reduce((sum, ratio) => sum + ratio, 0);
+            const height = width / ratioSum;
+            let x = 0;
+            for (let index = start; index < end; index++) {
+                const right = index === end - 1 ? width : x + height * ratios[index];
+                placements.push({ x, y, width: right - x, height });
+                x = right;
+            }
+            y += height;
+            start = end;
+        }
+        return { width, height: y, placements };
+    }
+
     // 预览和导出共用同一组坐标，保留原图比例和帖子顺序。
     function planImageLayout(sizes, layout = 'horizontal') {
         if (!sizes.length) throw new Error('请至少选择 1 张图片');
         if (sizes.some(size => !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0)) {
             throw new Error('无法读取图片尺寸，请重新打开预览');
         }
+        if (layout === 'justified') return planJustifiedLayout(sizes);
         const placements = [];
         if (layout === 'horizontal' || layout === 'vertical') {
             let offset = 0;
@@ -1092,8 +1139,8 @@
             canvas.height = plan.height;
             const ctx = canvas.getContext('2d');
             if (!ctx) throw new Error('无法创建画布，请降低尺寸后重试');
-            ctx.imageSmoothingEnabled = plan.scale < 1;
-            if (plan.scale < 1) ctx.imageSmoothingQuality = 'high';
+            ctx.imageSmoothingEnabled = layout === 'justified' || plan.scale < 1;
+            if (ctx.imageSmoothingEnabled) ctx.imageSmoothingQuality = 'high';
             if (format === 'image/jpeg') {
                 ctx.fillStyle = '#ffffff';
                 ctx.fillRect(0, 0, plan.width, plan.height);
@@ -1544,6 +1591,7 @@
         function render() {
             if (!overlay.isConnected) return;
             const options = getCurrentOptions();
+            scaleSelect.options[0].textContent = options.layout === 'justified' ? '100%（排版尺寸）' : '100%（原图）';
             const indexes = images.map((_, index) => index).filter(index => selected.has(index));
             summary.textContent = `已选 ${indexes.length} / ${images.length} 张`;
             qualityLabel.textContent = options.format === 'image/png' ? '无损' : `${Math.round(options.quality * 100)}%`;
