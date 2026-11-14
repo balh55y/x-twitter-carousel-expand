@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.4.0
+// @version      6.4.1
 // @description  选择 X 帖子图片，按横向、纵向或网格排版复制和下载；支持画质、尺寸和页面宽度设置
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
@@ -19,7 +19,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.4.0';
+    const VERSION = '6.4.1';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
@@ -1062,6 +1062,17 @@
         };
     }
 
+    function getExportSizeError(plan, format) {
+        // Chromium can encode an oversized WebP without reporting that it cropped the image.
+        if (format === 'image/webp' && (plan.width > 16383 || plan.height > 16383)) {
+            return `WebP 图片尺寸为 ${plan.width}×${plan.height}，单边上限 16383 px。请降低尺寸或改用 JPEG/PNG`;
+        }
+        if (plan.width > 32767 || plan.height > 32767 || plan.width * plan.height > 64000000) {
+            return `图片尺寸为 ${plan.width}×${plan.height}，请减少选择或降低尺寸`;
+        }
+        return '';
+    }
+
     function selectedImageUrls(images, selected) {
         return images.filter((_, index) => selected.has(index));
     }
@@ -1074,9 +1085,8 @@
         let canvas;
         try {
             const plan = scaleImageLayout(planImageLayout(sizes, layout), scaleMode);
-            if (plan.width > 32767 || plan.height > 32767 || plan.width * plan.height > 64000000) {
-                throw new Error(`图片尺寸为 ${plan.width}×${plan.height}，请减少选择或降低尺寸`);
-            }
+            const sizeError = getExportSizeError(plan, format);
+            if (sizeError) throw new Error(sizeError);
             canvas = document.createElement('canvas');
             canvas.width = plan.width;
             canvas.height = plan.height;
@@ -1111,6 +1121,22 @@
                     else reject(new Error('图片编码失败，请降低尺寸后重试'));
                 }, format, quality);
             });
+            // Release the full canvas before decoding the file for an independent size check.
+            canvas.width = 1; canvas.height = 1;
+            onProgress?.('正在检查导出图片');
+            let encoded;
+            try {
+                encoded = await blobToBitmap(blob);
+            } catch {
+                throw new Error('无法检查导出图片，请降低尺寸或更换格式后重试');
+            }
+            try {
+                if (encoded.width !== plan.width || encoded.height !== plan.height) {
+                    throw new Error(`导出图片尺寸不完整（${encoded.width}×${encoded.height}，应为 ${plan.width}×${plan.height}），请降低尺寸或更换格式后重试`);
+                }
+            } finally {
+                releaseBitmaps([encoded]);
+            }
             return { blob, width: plan.width, height: plan.height, size: blob.size, format: blob.type || format };
         } finally {
             sources.length = 0;
@@ -1563,11 +1589,12 @@
             const bytes = output.width * output.height * factor;
             sizeBadge.textContent = `预估约 ${formatBytes(bytes)} · ${output.width}×${output.height}`;
             sizeBadge.className = 'x-size-badge';
-            if (output.width > 32767 || output.height > 32767 || output.width * output.height > 64000000) {
-                sizeBadge.textContent += ' · 请减少选择或降低尺寸';
+            const sizeError = getExportSizeError(output, options.format);
+            if (sizeError) {
+                sizeBadge.textContent = sizeError;
                 sizeBadge.classList.add('warning');
             }
-            sizeBadge.title = '文件大小为估算值，各平台的发送限制可能不同';
+            sizeBadge.title = sizeError || '文件大小为估算值，各平台的发送限制可能不同';
         }
         selectAll.addEventListener('click', () => {
             images.forEach((_, index) => { selected.add(index); checks[index].checked = true; entries[index].img.loading = 'eager'; });

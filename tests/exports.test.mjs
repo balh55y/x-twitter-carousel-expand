@@ -7,11 +7,12 @@ const source = readFileSync(new URL('../x-twitter-carousel-expand.user.js', impo
 const marker = '    // ==========================================================\n    // 初始化执行';
 assert.ok(source.includes(marker), 'Initialization marker missing');
 const testSource = source.slice(0, source.indexOf(marker)) +
-    'globalThis.api = { combineImages, planImageLayout, scaleImageLayout, selectedImageUrls, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
+    'globalThis.api = { combineImages, planImageLayout, scaleImageLayout, getExportSizeError, selectedImageUrls, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
 
-function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, scheduler, dimensions = {}, drawFailure = false } = {}) {
+function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, scheduler, dimensions = {}, drawFailure = false, encodedDimensions, encodedDecodeFailure = false } = {}) {
     const state = { closed: [], draws: [], canvas: null, requests: 0, urls: [], decoded: 0, active: 0, maxActive: 0 };
     const values = new Map();
+    const encodedSizes = new WeakMap();
     const context = {
         console, Blob, setTimeout, clearTimeout, performance: { now: () => 100 },
         Map, Set, URL, scheduler,
@@ -23,7 +24,12 @@ function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, sc
                 state.canvas = {
                     width: 0, height: 0,
                     getContext: () => ({ fillRect() {}, drawImage: (...args) => { if (drawFailure) throw new Error('draw failed'); state.draws.push(args.slice(1)); } }),
-                    toBlob(callback, type) { callback(encodeFailure ? null : new Blob(['encoded'], { type })); }
+                    toBlob(callback, type) {
+                        if (encodeFailure) { callback(null); return; }
+                        const blob = new Blob(['encoded'], { type });
+                        encodedSizes.set(blob, encodedDimensions || { width: this.width, height: this.height });
+                        callback(blob);
+                    }
                 };
                 return state.canvas;
             }
@@ -36,7 +42,12 @@ function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, sc
         },
         async createImageBitmap(blob) {
             const id = ++state.decoded;
-            const size = dimensions[await blob.text()] || { width: 3, height: 4 };
+            if (encodedSizes.has(blob)) {
+                assert.equal(state.canvas.width, 1, 'release canvas before validating encoded file');
+                assert.equal(state.canvas.height, 1);
+                if (encodedDecodeFailure) throw new Error('decode failed');
+            }
+            const size = encodedSizes.get(blob) || dimensions[await blob.text()] || { width: 3, height: 4 };
             state.active++;
             state.maxActive = Math.max(state.maxActive, state.active);
             return { ...size, close() { state.closed.push(id); state.active--; } };
@@ -59,7 +70,7 @@ test('scaled tiles meet at rounded cumulative boundaries and resources are relea
     assert.equal(output.width, 5);
     assert.equal(output.height, 2);
     assert.deepEqual(state.draws.map(([x, , width]) => [x, width]), [[0, 2], [2, 1], [3, 2]]);
-    assert.equal(state.closed.length, 6);
+    assert.equal(state.closed.length, 7);
     assert.equal(state.active, 0);
     assert.equal(state.maxActive, 1);
     assert.equal(state.canvas.width, 1);
@@ -160,7 +171,7 @@ test('20 photos use seven rows in a three-column grid and preserve order', async
     assert.deepEqual([result.width,result.height],[9,28]);
     assert.equal(state.draws.length,20);
     assert.deepEqual(state.draws[19],[3,24,3,4]);
-    assert.equal(state.closed.length,40);
+    assert.equal(state.closed.length,41);
     assert.equal(state.active,0);
     assert.equal(state.maxActive,1);
 });
@@ -202,5 +213,67 @@ test('draw failure releases the currently decoded image and canvas', async () =>
     await assert.rejects(api.combineImages(['a', 'b'], options), /draw failed/);
     assert.equal(state.active, 0);
     assert.equal(state.closed.length, state.decoded);
+    assert.equal(state.canvas.width, 1);
+});
+
+
+for (const axis of ['width', 'height']) {
+    test('WebP rejects oversized ' + axis + ' before canvas allocation', async () => {
+        const size = { width: 20, height: 20, [axis]: 16384 };
+        const { api, state } = harness({ dimensions: { a: size } });
+        await assert.rejects(api.combineImages(['a'], { ...options, format: 'image/webp', scaleMode: '1' }), /16383 px.*JPEG[\/]PNG/);
+        assert.equal(state.canvas, null);
+        assert.equal(state.closed.length, 1);
+        assert.equal(state.active, 0);
+    });
+
+    test('WebP accepts the exact ' + axis + ' limit', async () => {
+        const size = { width: 20, height: 20, [axis]: 16383 };
+        const { api, state } = harness({ dimensions: { a: size } });
+        const result = await api.combineImages(['a'], { ...options, format: 'image/webp', scaleMode: '1' });
+        assert.equal(result[axis], 16383);
+        assert.equal(state.active, 0);
+    });
+}
+
+test('WebP size validation uses the selected scale', async () => {
+    const { api, state } = harness({ dimensions: { a: { width: 3072, height: 19965 } } });
+    const result = await api.combineImages(['a'], { ...options, format: 'image/webp', scaleMode: '0.75' });
+    assert.deepEqual([result.width, result.height], [2304, 14974]);
+    assert.equal(state.active, 0);
+});
+
+test('JPEG and PNG keep full height above the WebP limit', async () => {
+    for (const format of ['image/jpeg', 'image/png']) {
+        const { api, state } = harness({ dimensions: { a: { width: 3072, height: 19965 } } });
+        const result = await api.combineImages(['a'], { ...options, format, scaleMode: '1' });
+        assert.deepEqual([result.width, result.height], [3072, 19965]);
+        assert.equal(state.active, 0);
+    }
+});
+
+test('preview and export share WebP limits and canvas area checks', () => {
+    const { api } = harness();
+    assert.match(api.getExportSizeError({width:3072,height:19965}, 'image/webp'), /16383 px/);
+    assert.equal(api.getExportSizeError({width:3072,height:19965}, 'image/jpeg'), '');
+    assert.match(api.getExportSizeError({width:9000,height:9000}, 'image/webp'), /减少选择或降低尺寸/);
+});
+
+for (const encodedDimensions of [{width:4,height:4},{width:6,height:3}]) {
+    test('cropped encoded file ' + JSON.stringify(encodedDimensions) + ' cannot report success', async () => {
+        const { api, state } = harness({ encodedDimensions });
+        await assert.rejects(api.combineImages(['a','b'], {...options,scaleMode:'1'}), /导出图片尺寸不完整/);
+        assert.equal(state.closed.length, 5);
+        assert.equal(state.active, 0);
+        assert.equal(state.canvas.width, 1);
+        assert.equal(state.canvas.height, 1);
+    });
+}
+
+test('unreadable encoded output is rejected and canvas memory is released', async () => {
+    const { api, state } = harness({ encodedDecodeFailure: true });
+    await assert.rejects(api.combineImages(['a'], options), /无法检查导出图片/);
+    assert.equal(state.closed.length, 2);
+    assert.equal(state.active, 0);
     assert.equal(state.canvas.width, 1);
 });
