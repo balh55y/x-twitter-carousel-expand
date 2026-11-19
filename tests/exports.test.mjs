@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../x-twitter-carousel-expand.user.js', impo
 const marker = '    // ==========================================================\n    // 初始化执行';
 assert.ok(source.includes(marker), 'Initialization marker missing');
 const testSource = source.slice(0, source.indexOf(marker)) +
-    'globalThis.api = { combineImages, planImageLayout, scaleImageLayout, getExportSizeError, selectedImageUrls, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
+    'globalThis.api = { createImageCache, combineImages, planImageLayout, scaleImageLayout, getExportSizeError, selectedImageUrls, getStoredSettings, saveStoredSettings, copyToClipboard, yieldToMain };})();';
 
 function harness({ failAt = -1, encodeFailure = false, deniedStorage = false, scheduler, dimensions = {}, drawFailure = false, encodedDimensions, encodedDecodeFailure = false } = {}) {
     const state = { closed: [], draws: [], canvas: null, requests: 0, urls: [], decoded: 0, active: 0, maxActive: 0 };
@@ -382,4 +382,155 @@ test('smart mode rejects empty and invalid dimensions before partitioning', () =
     for (const size of [{width:0,height:1},{width:1,height:-1},{width:NaN,height:4}]) {
         assert.throws(() => api.planImageLayout([size], 'justified'), /无法读取图片尺寸/);
     }
+});
+
+
+test('preview Blob URL and repeated exports share the same original requests', async () => {
+    const { api, state } = harness();
+    const cache = api.createImageCache();
+    try {
+        const urls = await Promise.all(['a','b','c'].map(url => cache.getObjectURL(url)));
+        assert.ok(urls.every(url => url.startsWith('blob:')));
+        assert.equal(await cache.getObjectURL('a'), urls[0]);
+        assert.equal(state.requests, 3);
+        for (const format of ['image/png','image/jpeg','image/webp']) {
+            await api.combineImages(['a','b','c'], {...options,format,layout:'justified'}, undefined, cache);
+        }
+        assert.equal(state.requests, 3);
+        assert.equal(state.active, 0);
+        assert.equal(state.maxActive, 1);
+    } finally { cache.dispose(); }
+});
+
+test('a later export downloads only source URLs absent from the viewer cache', async () => {
+    const { api, state } = harness();
+    const cache = api.createImageCache();
+    await cache.get('a');
+    await api.combineImages(['a','c'], options, undefined, cache);
+    assert.deepEqual(state.urls, ['a','c']);
+    cache.dispose();
+});
+
+test('pending requests are deduplicated and network concurrency is bounded', async () => {
+    const { api, context } = harness();
+    const pending = [];
+    let requests = 0, active = 0, peak = 0;
+    context.GM_xmlhttpRequest = options => {
+        requests++; active++; peak = Math.max(peak, active);
+        pending.push(() => { active--; options.onload({status:200,response:new Blob([options.url])}); });
+    };
+    const cache = api.createImageCache(2);
+    const first = cache.get('a');
+    assert.equal(cache.get('a'), first);
+    const tasks = [first, cache.get('b'), cache.get('c'), cache.get('d')];
+    assert.equal(requests, 2);
+    while (pending.length) {
+        pending.shift()();
+        await Promise.resolve();
+        await Promise.resolve();
+    }
+    await Promise.all(tasks);
+    assert.equal(requests, 4);
+    assert.equal(peak, 2);
+    cache.dispose();
+});
+
+test('a failed source can retry while completed sources remain cached', async () => {
+    const { api, state } = harness({failAt:1});
+    const cache = api.createImageCache();
+    const first = await cache.get('a');
+    await assert.rejects(cache.get('b'), /网络错误/);
+    const second = await cache.get('b');
+    assert.ok(second instanceof Blob);
+    assert.equal(await cache.get('a'), first);
+    assert.deepEqual(state.urls, ['a','b','b']);
+    cache.dispose();
+});
+
+test('PNG clipboard fallback reuses the originals already used for JPEG', async () => {
+    const { api, context, state } = harness();
+    const cache = api.createImageCache();
+    let writes = 0;
+    context.navigator = {clipboard:{async write(){writes++;}}};
+    context.ClipboardItem = class {static supports(type){return type==='image/png';} constructor(data){this.data=data;}};
+    const jpeg = await api.combineImages(['a','b'], {...options,format:'image/jpeg'}, undefined, cache);
+    const result = await api.copyToClipboard(jpeg.blob, jpeg.format, async () => {
+        const png = await api.combineImages(['a','b'], {...options,format:'image/png'}, undefined, cache);
+        return png.blob;
+    });
+    assert.equal(result.isFallback, true);
+    assert.equal(writes, 1);
+    assert.equal(state.requests, 2);
+    cache.dispose();
+});
+
+test('dispose revokes preview URLs, blocks future requests and is idempotent', async () => {
+    const { api, context, state } = harness();
+    const created = [], revoked = [];
+    context.URL = {createObjectURL(blob){const url='blob:'+created.length;created.push({blob,url});return url;},revokeObjectURL(url){revoked.push(url);}};
+    const cache = api.createImageCache();
+    const url = await cache.getObjectURL('a');
+    assert.equal(await cache.getObjectURL('a'), url);
+    cache.dispose(); cache.dispose();
+    assert.deepEqual(revoked, [url]);
+    await assert.rejects(cache.get('a'), /预览已关闭/);
+    assert.equal(state.requests, 1);
+});
+
+test('closing during a request rejects waiters and never starts queued requests', async () => {
+    const { api, context } = harness();
+    let finish, requests=0, created=0;
+    context.GM_xmlhttpRequest = options => { requests++; finish=()=>options.onload({status:200,response:new Blob(['a'])}); };
+    context.URL = {createObjectURL(){created++;return 'blob:late';},revokeObjectURL(){}};
+    const cache = api.createImageCache(1);
+    const active = cache.getObjectURL('a');
+    const queued = cache.get('b');
+    const checked = Promise.all([assert.rejects(active,/预览已关闭/),assert.rejects(queued,/预览已关闭/)]);
+    cache.dispose();
+    finish();
+    await checked;
+    await Promise.resolve();
+    assert.equal(requests, 1);
+    assert.equal(created, 0);
+});
+
+test('invalidating a broken preview revokes it and permits a fresh source request', async () => {
+    const { api, context, state } = harness();
+    const revoked=[];
+    context.URL={createObjectURL(){return 'blob:preview-'+state.requests;},revokeObjectURL(url){revoked.push(url);}};
+    const cache=api.createImageCache();
+    const first=await cache.getObjectURL('a');
+    cache.invalidate('a');
+    assert.deepEqual(revoked,[first]);
+    const second=await cache.getObjectURL('a');
+    assert.notEqual(second,first);
+    assert.equal(state.requests,2);
+    cache.dispose();
+});
+
+
+test('source decoding failure invalidates only that Blob and allows export retry', async () => {
+    const { api, context, state } = harness();
+    const cache = api.createImageCache();
+    const nativeDecode=context.createImageBitmap;
+    let fail=true;
+    context.createImageBitmap=async blob=>{
+        if (fail && await blob.text()==='b') { fail=false;throw new Error('bad source'); }
+        return nativeDecode(blob);
+    };
+    await assert.rejects(api.combineImages(['a','b'], options, undefined, cache), /bad source/);
+    await api.combineImages(['a','b'], options, undefined, cache);
+    assert.deepEqual(state.urls,['a','b','b']);
+    assert.equal(state.active,0);
+    cache.dispose();
+});
+
+test('encoding failure does not discard sources needed for a second attempt', async () => {
+    const { api, state } = harness({encodeFailure:true});
+    const cache=api.createImageCache();
+    await assert.rejects(api.combineImages(['a','b'], options, undefined, cache), /图片编码失败/);
+    await assert.rejects(api.combineImages(['a','b'], options, undefined, cache), /图片编码失败/);
+    assert.equal(state.requests,2);
+    assert.equal(state.active,0);
+    cache.dispose();
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.5.0
+// @version      6.5.1
 // @description  选择 X 帖子图片，支持智能排版、横向、纵向和网格，复制和下载时可设置画质与尺寸
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
@@ -19,7 +19,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.5.0';
+    const VERSION = '6.5.1';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
@@ -967,6 +967,74 @@
         });
     }
 
+    // The viewer owns compressed source blobs; decoded bitmaps still live for one draw only.
+    function createImageCache(concurrency = 3) {
+        const entries = new Map();
+        const queue = [];
+        let active = 0;
+        let disposed = false;
+
+        async function run(entry) {
+            active++;
+            try {
+                const blob = await gmRequest(entry.url);
+                if (disposed) throw new Error('图片预览已关闭');
+                entry.blob = blob;
+                entry.resolve(blob);
+            } catch (error) {
+                if (entries.get(entry.url) === entry) entries.delete(entry.url);
+                entry.reject(error);
+            } finally {
+                active--;
+                pump();
+            }
+        }
+        function pump() {
+            while (!disposed && active < concurrency && queue.length) {
+                void run(queue.shift());
+            }
+        }
+        function get(url) {
+            if (disposed) return Promise.reject(new Error('图片预览已关闭'));
+            let entry = entries.get(url);
+            if (!entry) {
+                entry = { url, blob: null, objectURL: null };
+                entry.promise = new Promise((resolve, reject) => {
+                    entry.resolve = resolve;
+                    entry.reject = reject;
+                });
+                entries.set(url, entry);
+                queue.push(entry);
+                pump();
+            }
+            return entry.promise;
+        }
+        async function getObjectURL(url) {
+            await get(url);
+            if (disposed) throw new Error('图片预览已关闭');
+            const entry = entries.get(url);
+            if (!entry.objectURL) entry.objectURL = URL.createObjectURL(entry.blob);
+            return entry.objectURL;
+        }
+        function invalidate(url) {
+            const entry = entries.get(url);
+            if (entry?.objectURL) URL.revokeObjectURL(entry.objectURL);
+            entries.delete(url);
+        }
+        function dispose() {
+            if (disposed) return;
+            disposed = true;
+            for (const entry of entries.values()) {
+                if (entry.objectURL) URL.revokeObjectURL(entry.objectURL);
+                entry.blob = null;
+                entry.reject(new Error('图片预览已关闭'));
+            }
+            entries.clear();
+            queue.length = 0;
+        }
+        return { get, getObjectURL, invalidate, dispose };
+    }
+
     // ==========================================================
     // Blob → ImageBitmap / Image
     // ==========================================================
@@ -997,13 +1065,19 @@
         }
     }
 
-    async function loadAllImages(urls, onProgress) {
+    async function loadAllImages(urls, onProgress, imageCache) {
         const sources = [];
         const sizes = [];
         for (let i = 0; i < urls.length; i++) {
-            onProgress?.(`正在下载原图（${i + 1}/${urls.length}）`);
-            const blob = await gmRequest(urls[i]);
-            const bitmap = await blobToBitmap(blob);
+            onProgress?.(`正在准备原图（${i + 1}/${urls.length}）`);
+            const blob = await (imageCache ? imageCache.get(urls[i]) : gmRequest(urls[i]));
+            let bitmap;
+            try {
+                bitmap = await blobToBitmap(blob);
+            } catch (error) {
+                imageCache?.invalidate(urls[i]);
+                throw error;
+            }
             try {
                 sizes.push({ width: bitmap.width, height: bitmap.height });
                 sources.push(blob);
@@ -1124,11 +1198,11 @@
         return images.filter((_, index) => selected.has(index));
     }
 
-    // 失败和成功路径都释放已解码图片；只下载本次选中的图片。
-    async function combineImages(urls, options, onProgress) {
+    // Reuse source blobs while releasing each decoded image immediately after drawing.
+    async function combineImages(urls, options, onProgress, imageCache) {
         if (!urls.length) throw new Error('请至少选择 1 张图片');
         const { format, quality, scaleMode, layout = 'horizontal' } = options;
-        const { sources, sizes } = await loadAllImages(urls, onProgress);
+        const { sources, sizes } = await loadAllImages(urls, onProgress, imageCache);
         let canvas;
         try {
             const plan = scaleImageLayout(planImageLayout(sizes, layout), scaleMode);
@@ -1280,7 +1354,7 @@
     // ==========================================================
     // 复制操作处理
     // ==========================================================
-    async function handleCopy(urls, copyBtn, statusEl, getOptions) {
+    async function handleCopy(urls, copyBtn, statusEl, getOptions, imageCache) {
         if (copyBtn.disabled || statusEl._exporting || !urls.length) return;
         setExportBusy(statusEl, true);
 
@@ -1291,14 +1365,15 @@
             const options = getOptions();
             showStatus(statusEl, '正在准备原图', false);
 
-            const result = await combineImages(urls, options, msg => showStatus(statusEl, msg, false));
+            const result = await combineImages(urls, options, msg => showStatus(statusEl, msg, false), imageCache);
+            if (!statusEl.isConnected) return;
 
             showStatus(statusEl, `正在写入剪贴板（${formatBytes(result.size)}）`, false);
 
             const copyRes = await copyToClipboard(result.blob, result.format, async () => {
                 // 如果浏览器剪贴板只吃 PNG，回退生成同样尺寸的 PNG
                 showStatus(statusEl, '正在生成剪贴板支持的 PNG 图片', false);
-                const pngResult = await combineImages(urls, { ...options, format: 'image/png' });
+                const pngResult = await combineImages(urls, { ...options, format: 'image/png' }, undefined, imageCache);
                 return pngResult.blob;
             });
 
@@ -1330,7 +1405,7 @@
     // ==========================================================
     // 下载操作处理
     // ==========================================================
-    async function handleDownload(urls, downloadBtn, statusEl, getOptions) {
+    async function handleDownload(urls, downloadBtn, statusEl, getOptions, imageCache) {
         if (downloadBtn.disabled || statusEl._exporting || !urls.length) return;
         setExportBusy(statusEl, true);
 
@@ -1341,7 +1416,8 @@
             const options = getOptions();
             showStatus(statusEl, '正在生成下载文件', false);
 
-            const result = await combineImages(urls, options, msg => showStatus(statusEl, msg, false));
+            const result = await combineImages(urls, options, msg => showStatus(statusEl, msg, false), imageCache);
+            if (!statusEl.isConnected) return;
 
             const ext = result.format === 'image/jpeg' ? 'jpg' : result.format === 'image/webp' ? 'webp' : 'png';
             const filename = `x_carousel_${Date.now()}.${ext}`;
@@ -1379,6 +1455,8 @@
         overlay.setAttribute('aria-labelledby', `${OVERLAY_ID}_title`);
         overlay.setAttribute('closedby', 'any');
         let renderFrame = null;
+        const imageCache = createImageCache();
+        let disposed = false;
 
         const toolbar = document.createElement('div');
         toolbar.className = 'x-expand-toolbar';
@@ -1528,6 +1606,15 @@
         unused.append(unusedTitle, unusedImages);
         viewport.append(stage, empty, unused);
 
+        const imageObserver = typeof IntersectionObserver === 'function'
+            ? new IntersectionObserver(observations => {
+                for (const observation of observations) {
+                    if (!observation.isIntersecting) continue;
+                    imageObserver.unobserve(observation.target);
+                    void loadPreview(entries[Number(observation.target.dataset.index)]);
+                }
+            }, { root: viewport, rootMargin: '400px' })
+            : null;
         const entries = images.map((url, index) => {
             const button = makeButton('', 'x-preview-item');
             button.dataset.index = String(index);
@@ -1537,16 +1624,34 @@
             img.decoding = 'async';
             img.loading = selected.has(index) ? 'eager' : 'lazy';
             img.addEventListener('load', scheduleRender);
-            img.addEventListener('error', scheduleRender);
-            img.src = url;
+            img.addEventListener('error', () => {
+                imageCache.invalidate(url);
+                img.removeAttribute('src');
+                img.alt = '加载失败，请取消后重新选择';
+                scheduleRender();
+            });
             const number = document.createElement('span');
             number.className = 'x-preview-number';
             number.setAttribute('aria-hidden', 'true');
             number.textContent = String(index + 1);
             button.append(img, number);
             button.addEventListener('click', () => toggleSelection(index, !selected.has(index)));
-            return { button, img };
+            return { button, img, url, loading: false };
         });
+        async function loadPreview(entry) {
+            if (disposed || entry.loading || entry.img.hasAttribute('src')) return;
+            entry.loading = true;
+            try {
+                const objectURL = await imageCache.getObjectURL(entry.url);
+                if (disposed) return;
+                entry.img.alt = '';
+                entry.img.src = objectURL;
+            } catch {
+                if (!disposed) entry.img.alt = '加载失败，请取消后重新选择';
+            } finally {
+                entry.loading = false;
+            }
+        }
 
         const status = document.createElement('div');
         status.className = 'x-copy-status';
@@ -1581,7 +1686,7 @@
             if (status._exporting) return;
             if (checked) selected.add(index); else selected.delete(index);
             checks[index].checked = checked;
-            if (checked) entries[index].img.loading = 'eager';
+            if (checked) { entries[index].img.loading = 'eager'; void loadPreview(entries[index]); }
             render();
         }
         function scheduleRender() {
@@ -1645,15 +1750,15 @@
             sizeBadge.title = sizeError || '文件大小为估算值，各平台的发送限制可能不同';
         }
         selectAll.addEventListener('click', () => {
-            images.forEach((_, index) => { selected.add(index); checks[index].checked = true; entries[index].img.loading = 'eager'; });
+            images.forEach((_, index) => { selected.add(index); checks[index].checked = true; entries[index].img.loading = 'eager'; void loadPreview(entries[index]); });
             render();
         });
         clearAll.addEventListener('click', () => { selected.clear(); checks.forEach(input => { input.checked = false; }); render(); });
         for (const control of [fmtSelect, qualitySlider, scaleSelect, ...layoutInputs]) {
             control.addEventListener(control === qualitySlider ? 'input' : 'change', () => { saveStoredSettings(getCurrentOptions()); render(); });
         }
-        copyButton.addEventListener('click', () => handleCopy(selectedImageUrls(images, selected), copyButton, status, getCurrentOptions));
-        downloadButton.addEventListener('click', () => handleDownload(selectedImageUrls(images, selected), downloadButton, status, getCurrentOptions));
+        copyButton.addEventListener('click', () => handleCopy(selectedImageUrls(images, selected), copyButton, status, getCurrentOptions, imageCache));
+        downloadButton.addEventListener('click', () => handleDownload(selectedImageUrls(images, selected), downloadButton, status, getCurrentOptions, imageCache));
         closeButton.addEventListener('click', closeViewer);
         overlay.addEventListener('click', event => event.stopPropagation());
         if (!('closedBy' in HTMLDialogElement.prototype)) {
@@ -1675,12 +1780,22 @@
         }, { passive: false });
         const resize = new ResizeObserver(scheduleRender);
         resize.observe(viewport);
-        overlay.addEventListener('close', () => {
+        function disposeViewer() {
+            if (disposed) return;
+            disposed = true;
             resize.disconnect();
+            imageObserver?.disconnect();
             if (renderFrame !== null) cancelAnimationFrame(renderFrame);
-            overlay.remove();
-        }, { once: true });
+            entries.forEach(entry => entry.img.removeAttribute('src'));
+            imageCache.dispose();
+        }
+        overlay._dispose = disposeViewer;
+        overlay.addEventListener('close', () => { disposeViewer(); overlay.remove(); }, { once: true });
         render();
+        entries.forEach((entry, index) => {
+            if (selected.has(index) || !imageObserver) void loadPreview(entry);
+            else imageObserver.observe(entry.button);
+        });
     }
 
 
@@ -1690,6 +1805,7 @@
     function closeViewer() {
         const overlay = document.getElementById(OVERLAY_ID);
         if (!overlay) return;
+        overlay._dispose?.();
 
         if (overlay.open) overlay.close();
         overlay.remove();
