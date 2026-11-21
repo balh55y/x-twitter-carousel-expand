@@ -1,27 +1,53 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.5.1
-// @description  选择 X 帖子图片，支持智能排版、横向、纵向和网格，复制和下载时可设置画质与尺寸
+// @version      6.6.0
+// @description  展开、选择和排版 X 帖子图片；支持拼图复制、原图和视频下载，多文件打包 ZIP
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      pbs.twimg.com
 // @connect      abs.twimg.com
+// @connect      video.twimg.com
+// @connect      x.com
+// @connect      twitter.com
 // @homepageURL  https://github.com/balh55y/x-twitter-carousel-expand
 // @supportURL   https://github.com/balh55y/x-twitter-carousel-expand/issues
 // @downloadURL  https://raw.githubusercontent.com/balh55y/x-twitter-carousel-expand/main/x-twitter-carousel-expand.user.js
 // @updateURL    https://raw.githubusercontent.com/balh55y/x-twitter-carousel-expand/main/x-twitter-carousel-expand.user.js
 // ==/UserScript==
+/*
+ * Media API adaptation: Copyright (c) Azuki
+ * Source: One-Click X/Twitter Media Downloader 1.5.2 (MIT).
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 (() => {
     'use strict';
 
-    const VERSION = '6.5.1';
+    const VERSION = '6.6.0';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
+    const MEDIA_BUTTON_CLASS = '__x_media_download_v6__';
+    const tweetJobs = new WeakMap();
+    const viewerResources = new WeakMap();
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
     const STYLE_ID = '__x_carousel_style_v6__';
     const WIDTH_BUTTON_ID = '__x_carousel_width_v6__';
@@ -432,7 +458,7 @@
             }
 
             /* 帖子右上角展开按钮 */
-            .${BUTTON_CLASS} {
+            :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) {
                 width: 34px !important;
                 height: 34px !important;
                 display: flex !important;
@@ -443,7 +469,7 @@
                 padding: 0 !important;
             }
 
-            .${BUTTON_CLASS} > button {
+            :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) > button {
                 appearance: none !important;
                 width: 34px !important;
                 height: 34px !important;
@@ -460,11 +486,11 @@
                 transition: background-color .15s ease !important;
             }
 
-            .${BUTTON_CLASS} > button:hover {
+            :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) > button:hover {
                 background: rgba(15, 20, 25, .10) !important;
             }
 
-            .${BUTTON_CLASS} svg {
+            :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) svg {
                 width: 20px !important;
                 height: 20px !important;
                 fill: currentColor !important;
@@ -597,6 +623,7 @@
 
             #${OVERLAY_ID} .x-expand-actions {
                 display: flex !important;
+                flex-wrap: wrap !important;
                 align-items: center !important;
                 gap: 8px !important;
                 margin-inline-start: auto !important;
@@ -689,7 +716,7 @@
             }
 
             #${OVERLAY_ID} :is(button, select, input):focus-visible,
-            .${BUTTON_CLASS} > button:focus-visible {
+            :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) > button:focus-visible {
                 outline: 3px solid #005fcc !important;
                 outline-offset: 3px !important;
             }
@@ -736,7 +763,7 @@
             }
 
             @media (prefers-reduced-motion: reduce) {
-                .${BUTTON_CLASS} > button {
+                :is(.${BUTTON_CLASS}, .${MEDIA_BUTTON_CLASS}) > button {
                     transition: none !important;
                 }
             }
@@ -819,6 +846,15 @@
                 #${OVERLAY_ID} .x-preview-item[aria-pressed="true"]::after { border-color: Highlight; box-shadow: none; }
             }
 
+
+            #__x_media_status_v6__ {
+                position: fixed; z-index: 2147483647; inset-inline-start: 50%; inset-block-end: 24px;
+                transform: translateX(-50%); max-inline-size: calc(100% - 32px); padding: 10px 16px;
+                background: #fff; color: #30373d; border: 1px solid #858b91; border-radius: 5px;
+                font: 13px/1.5 system-ui, sans-serif; overflow-wrap: anywhere; pointer-events: none;
+            }
+            #__x_media_status_v6__ progress { display: block; inline-size: 100%; margin-block-start: 8px; accent-color: #434b52; }
+            #__x_media_status_v6__ progress[hidden] { display: none; }
         `;
         document.head.appendChild(style);
     }
@@ -826,52 +862,381 @@
     // ==========================================================
     // 获取帖子中的 X 图片原图链接
     // ==========================================================
+    function normalizeImageUrl(src) {
+        try {
+            const url = new URL(src);
+            if (url.protocol !== 'https:' || url.hostname !== 'pbs.twimg.com' || !url.pathname.startsWith('/media/')) return '';
+            const ext = url.pathname.match(/\.(jpe?g|png|webp|avif)$/i);
+            if (ext) {
+                url.pathname = url.pathname.slice(0, -ext[0].length);
+                if (!url.searchParams.has('format')) url.searchParams.set('format', ext[1].toLowerCase());
+            }
+            url.searchParams.set('name', 'orig');
+            return url.toString();
+        } catch { return ''; }
+    }
+
+    function isPostMedia(element, tweet) {
+        return element.closest('article[data-testid="tweet"]') === tweet &&
+            !element.closest('div[role="link"][tabindex="0"], [data-testid="card.wrapper"]');
+    }
+
     function getImages(tweet) {
         if (!tweet) return [];
-
-        const result = [];
-        const seen = new Set();
-
-        let imgs = [...tweet.querySelectorAll('[data-testid="tweetPhoto"] img')];
-        if (imgs.length < 2) {
-            imgs = [...tweet.querySelectorAll('img[src*="pbs.twimg.com/media/"]')];
-        }
-
+        const imgs = tweet.querySelectorAll('[data-testid="tweetPhoto"] img, img[src*="pbs.twimg.com/media/"]');
+        const urls = [];
         for (const img of imgs) {
-            let src = img.currentSrc || img.src || img.getAttribute('src') || '';
-            if (!src) continue;
-
-            try {
-                const url = new URL(src);
-                if (url.hostname === 'pbs.twimg.com' && url.pathname.startsWith('/media/')) {
-                    url.searchParams.set('name', 'orig');
-                }
-                src = url.toString();
-            } catch {
-                // 保留原地址
-            }
-
-            if (seen.has(src)) continue;
-            seen.add(src);
-            result.push(src);
+            if (!isPostMedia(img, tweet) || img.closest('[data-testid="videoPlayer"], [data-testid="previewInterstitial"]')) continue;
+            const url = normalizeImageUrl(img.currentSrc || img.src || '');
+            if (url) urls.push(url);
         }
-
-        return result;
+        return [...new Set(urls)];
     }
+
+    function getPostIdentity(tweet) {
+        if (!tweet) return { userId: 'x', postId: 'media' };
+        const links = [...tweet.querySelectorAll('a[href*="/status/"]')].filter(link => isPostMedia(link, tweet));
+        const link = links.find(item => item.querySelector('time')) || links[0];
+        const match = link?.href.match(/^https:\/\/(?:x|twitter)\.com\/([^/]+)\/status\/(\d+)/);
+        return match ? { userId: match[1], postId: match[2] } : { userId: 'x', postId: 'media' };
+    }
+
+    function safeMediaUrl(src, type) {
+        try {
+            const url = new URL(src);
+            if (url.protocol !== 'https:') return '';
+            if (type === 'photo') return normalizeImageUrl(url.href);
+            return url.hostname === 'video.twimg.com' && /\.mp4$/i.test(url.pathname) ? url.href : '';
+        } catch { return ''; }
+    }
+
+    // Media extraction and highest-bitrate selection adapted from Azuki's MIT-licensed
+    // One-Click X/Twitter Media Downloader 1.5.2. See THIRD_PARTY_NOTICES.md.
+    function mediaFromTweetData(input, postId) {
+        let tweet = input;
+        for (let i = 0; tweet?.tweet && i < 4; i++) tweet = tweet.tweet;
+        const id = String(tweet?.rest_id || tweet?.id_str || tweet?.legacy?.id_str || '');
+        if (id !== postId) return [];
+        let media = tweet.extended_entities?.media || tweet.legacy?.extended_entities?.media;
+        if (!media?.length) {
+            const bindings = tweet.card?.legacy?.binding_values || tweet.card?.binding_values;
+            const json = Array.isArray(bindings) ? bindings.find(item => item.key === 'unified_card')?.value?.string_value : null;
+            if (json) {
+                try { media = Object.values(JSON.parse(json).media_entities || {}); } catch { /* Try DOM fallback. */ }
+            }
+        }
+        const result = [];
+        for (const item of media || []) {
+            if (item.type === 'photo') {
+                const url = normalizeImageUrl(item.media_url_https || item.media_url);
+                if (!url) throw new Error('图片地址无效，请刷新 X 页面后重试');
+                result.push({ type: 'photo', url });
+            } else if (item.type === 'video' || item.type === 'animated_gif') {
+                const variants = (item.video_info?.variants || []).filter(v => v.content_type === 'video/mp4' && safeMediaUrl(v.url, item.type));
+                variants.sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+                if (!variants[0]) throw new Error('视频未提供可下载的 MP4，请稍后重试');
+                result.push({ type: item.type, url: variants[0].url });
+            }
+        }
+        return result.filter((item, i) => result.findIndex(other => other.url === item.url) === i);
+    }
+
+    function readTweetMedia(tweet, postId) {
+        let node = tweet;
+        // Use the page document when a userscript host isolates DOM expando properties.
+        if (typeof unsafeWindow !== 'undefined') {
+            node = [...unsafeWindow.document.querySelectorAll('article[data-testid="tweet"]')]
+                .find(article => getPostIdentity(article).postId === postId) || tweet;
+        }
+        const key = Object.keys(node).find(name => name.startsWith('__reactFiber$'));
+        let fiber = key && node[key];
+        for (let depth = 0; fiber && depth < 32; depth++, fiber = fiber.return) {
+            const props = fiber.memoizedProps;
+            const media = mediaFromTweetData(props?.tweet, postId);
+            if (media.length) return media;
+        }
+        return [];
+    }
+
+    function collectDomMedia(tweet) {
+        const result = getImages(tweet).map(url => ({ type: 'photo', url }));
+        for (const element of tweet.querySelectorAll('video, [data-testid="videoPlayer"] img, [data-testid="previewInterstitial"] img')) {
+            if (!isPostMedia(element, tweet)) continue;
+            const src = element.currentSrc || element.src || '';
+            const direct = safeMediaUrl(src, 'video');
+            if (direct) result.push({ type: src.includes('/tweet_video/') ? 'animated_gif' : 'video', url: direct });
+            else {
+                const poster = element.poster || src;
+                const gif = poster.match(/^https:\/\/pbs\.twimg\.com\/tweet_video_thumb\/([\w-]+)(?:\.[\w]+)?(?:\?|$)/);
+                if (gif) result.push({ type: 'animated_gif', url: 'https://video.twimg.com/tweet_video/' + gif[1] + '.mp4' });
+            }
+        }
+        return result.filter((item, i) => result.findIndex(other => other.url === item.url) === i);
+    }
+
+    function hasPostVideo(tweet) {
+        return [...tweet.querySelectorAll('[data-testid="videoPlayer"], [data-testid="previewInterstitial"], video')]
+            .some(element => isPostMedia(element, tweet));
+    }
+
+    async function getPostMedia(tweet, identity) {
+        let media = [];
+        try { media = readTweetMedia(tweet, identity.postId); } catch { /* Sandboxed hosts can deny page React properties. */ }
+        const video = hasPostVideo(tweet);
+        if (!video && media.length) return media;
+        if (video && media.some(item => item.type !== 'photo')) return media;
+        if (video && /^\d+$/.test(identity.postId)) {
+            try {
+                const data = await fetchTweetMedia(identity.postId);
+                media = mediaFromTweetData(data?.data?.tweetResult?.result, identity.postId);
+                if (media.some(item => item.type !== 'photo')) return media;
+            } catch { /* Direct MP4 and GIF URLs remain usable without the API. */ }
+        }
+        const domMedia = collectDomMedia(tweet);
+        if (video && !domMedia.some(item => item.type !== 'photo')) {
+            throw new Error('无法读取视频地址，请刷新 X 页面后重试');
+        }
+        return domMedia.length ? domMedia : media;
+    }
+
+    function mediaFilename(identity, media, index, blob) {
+        const basename = (identity.userId + '-' + identity.postId).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 160);
+        const type = media.type === 'photo' ? 'image' : media.type === 'animated_gif' ? 'gif' : 'video';
+        let ext = 'mp4';
+        if (media.type === 'photo') {
+            const mime = (blob.type || '').split(';')[0];
+            const mimeExt = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif' };
+            const url = new URL(media.url);
+            ext = mimeExt[mime] || url.searchParams.get('format') || url.pathname.match(/\.([a-z0-9]+)$/i)?.[1] || 'jpg';
+            if (!/^(?:jpe?g|png|webp|avif|gif)$/i.test(ext)) ext = 'jpg';
+        }
+        return basename + '-' + type + '-' + String(index + 1).padStart(2, '0') + '.' + ext;
+    }
+
+    const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
+        for (let i = 0; i < 8; i++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+        return value >>> 0;
+    });
+
+    // ZIP STORE keeps already-compressed media bytes intact and avoids a runtime library.
+    async function buildMediaZip(files, onProgress) {
+        if (!files.length || files.length >= 65535) throw new Error('媒体数量不支持打包，请减少选择');
+        const parts = [], central = [];
+        let offset = 0, centralSize = 0;
+        for (let i = 0; i < files.length; i++) {
+            const { name, blob } = files[i];
+            if (blob.size >= 0xffffffff) throw new Error('单个文件超过 ZIP 大小限制');
+            const encodedName = new TextEncoder().encode(name);
+            if (encodedName.length > 65535 || /[\\/]/.test(name)) throw new Error('文件名不支持打包');
+            let crc = 0xffffffff;
+            for (let position = 0; position < blob.size; position += 1048576) {
+                const bytes = new Uint8Array(await blob.slice(position, position + 1048576).arrayBuffer());
+                for (let k = 0; k < bytes.length; k++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ bytes[k]) & 255];
+                await yieldToMain();
+            }
+            crc = (crc ^ 0xffffffff) >>> 0;
+            const local = new Uint8Array(30 + encodedName.length), view = new DataView(local.buffer);
+            view.setUint32(0, 0x04034b50, true); view.setUint16(4, 20, true); view.setUint16(6, 0x0800, true);
+            view.setUint16(12, 33, true); view.setUint32(14, crc, true);
+            view.setUint32(18, blob.size, true); view.setUint32(22, blob.size, true); view.setUint16(26, encodedName.length, true);
+            local.set(encodedName, 30);
+            const directory = new Uint8Array(46 + encodedName.length), entry = new DataView(directory.buffer);
+            entry.setUint32(0, 0x02014b50, true); entry.setUint16(4, 20, true); entry.setUint16(6, 20, true);
+            entry.setUint16(8, 0x0800, true); entry.setUint16(14, 33, true); entry.setUint32(16, crc, true);
+            entry.setUint32(20, blob.size, true); entry.setUint32(24, blob.size, true); entry.setUint16(28, encodedName.length, true);
+            entry.setUint32(42, offset, true); directory.set(encodedName, 46);
+            parts.push(local, blob); central.push(directory);
+            offset += local.byteLength + blob.size; centralSize += directory.byteLength;
+            if (offset + centralSize + 22 >= 0xffffffff) throw new Error('媒体总大小超过 ZIP 限制，请减少选择');
+            onProgress?.(`正在打包媒体（${i + 1}/${files.length}）`, i + 1, files.length);
+        }
+        const end = new Uint8Array(22), footer = new DataView(end.buffer);
+        footer.setUint32(0, 0x06054b50, true); footer.setUint16(8, files.length, true); footer.setUint16(10, files.length, true);
+        footer.setUint32(12, centralSize, true); footer.setUint32(16, offset, true);
+        return new Blob([...parts, ...central, end], { type: 'application/zip' });
+    }
+
+    async function prepareMediaDownload(media, identity, imageCache, onProgress) {
+        if (!media.length) throw new Error('帖子中没有可下载的媒体');
+        const files = [];
+        for (let i = 0; i < media.length; i++) {
+            const item = media[i];
+            if (!safeMediaUrl(item.url, item.type)) throw new Error('媒体地址无效，请刷新 X 页面后重试');
+            onProgress?.(`正在下载媒体（${i + 1}/${media.length}）`, i, media.length);
+            const blob = item.type === 'photo' && imageCache ? await imageCache.get(item.url)
+                : await gmRequest(item.url, { timeout: 120000, onProgress: event => {
+                    const fraction = event.lengthComputable && event.total > 0 ? event.loaded / event.total : 0;
+                    onProgress?.(`正在下载媒体（${i + 1}/${media.length}，${formatBytes(event.loaded)}）`, i + fraction, media.length);
+                } });
+            if (!blob.size || /(?:text\/|application\/json)/i.test(blob.type)) throw new Error('媒体文件无效，请重试');
+            files.push({ name: mediaFilename(identity, item, i, blob), blob });
+            onProgress?.(`已读取媒体（${i + 1}/${media.length}）`, i + 1, media.length);
+        }
+        if (files.length === 1) return { blob: files[0].blob, filename: files[0].name, count: 1 };
+        const blob = await buildMediaZip(files, onProgress);
+        const base = mediaFilename(identity, media[0], 0, files[0].blob).replace(/-(image|gif|video)-01\.[^.]+$/, '');
+        return { blob, filename: base + '-media.zip', count: files.length };
+    }
+
+    function showMediaStatus(message, done = false, completed, total) {
+        let status = document.getElementById('__x_media_status_v6__');
+        if (!status) {
+            status = document.createElement('div'); status.id = '__x_media_status_v6__'; status.setAttribute('role', 'status');
+            const text = document.createElement('span'); text.className = 'x-media-message';
+            const progress = document.createElement('progress'); progress.setAttribute('aria-label', '下载媒体进度');
+            status.append(text, progress); document.body.append(status);
+        }
+        clearTimeout(status._timer);
+        status.querySelector('.x-media-message').textContent = message;
+        const progress = status.querySelector('progress');
+        progress.hidden = done;
+        if (Number.isFinite(total) && total > 0) { progress.max = total; progress.value = completed; }
+        else progress.removeAttribute('value');
+        if (done) status._timer = setTimeout(() => status.remove(), 6000);
+    }
+
+    async function handlePostMediaDownload(tweet, button) {
+        if (tweetJobs.has(tweet)) return;
+        tweetJobs.set(tweet, true); button.disabled = true; button.setAttribute('aria-busy', 'true');
+        const identity = getPostIdentity(tweet);
+        const existingCache = viewerResources.get(tweet);
+        const cache = existingCache || createImageCache();
+        try {
+            showMediaStatus('正在读取帖子媒体');
+            const media = await getPostMedia(tweet, identity);
+            const result = await prepareMediaDownload(media, identity, cache, (message, completed, total) => {
+                button.title = message; showMediaStatus(message, false, completed, total);
+            });
+            downloadBlob(result.blob, result.filename);
+            showMediaStatus(`已生成下载：${result.filename}（${result.count} 个媒体）`, true);
+        } catch (error) {
+            showMediaStatus(`下载媒体失败：${error?.message || '请重试'}`, true);
+        } finally {
+            if (!existingCache) cache.dispose();
+            tweetJobs.delete(tweet); button.disabled = false; button.removeAttribute('aria-busy'); button.title = '下载媒体';
+        }
+    }
+
+    function addMediaButton(tweet) {
+        const existing = tweet.querySelector('.' + MEDIA_BUTTON_CLASS);
+        const hasMedia = getImages(tweet).length || hasPostVideo(tweet);
+        if (!hasMedia) { existing?.remove(); return; }
+        if (existing) return;
+        const caret = tweet.querySelector('button[data-testid="caret"]');
+        const action = caret && findActionRow(caret);
+        const group = tweet.querySelector('[role="group"]');
+        const parent = action?.row || group;
+        if (!parent) return;
+        const wrapper = document.createElement('div'); wrapper.className = MEDIA_BUTTON_CLASS;
+        const button = document.createElement('button'); button.type = 'button'; button.title = '下载媒体'; button.setAttribute('aria-label', '下载媒体');
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h2v10l3.5-3.5 1.4 1.4L12 16.8l-5.9-5.9 1.4-1.4L11 13V3ZM5 16h2v3h10v-3h2v5H5v-5Z"/></svg>';
+        button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void handlePostMediaDownload(tweet, button); });
+        wrapper.append(button);
+        if (action) parent.insertBefore(wrapper, action.more); else parent.append(wrapper);
+    }
+
+    async function handleOriginalDownload(urls, button, status, cache, identity) {
+        if (!urls.length || status._exporting) return;
+        setExportBusy(status, true);
+        try {
+            const media = urls.map(url => ({ type: 'photo', url }));
+            const result = await prepareMediaDownload(media, identity, cache, (message, done, total) => {
+                showStatus(status, message, false); status._progress.max = total; status._progress.value = done;
+            });
+            if (!status.isConnected) return;
+            downloadBlob(result.blob, result.filename);
+            showStatus(status, `已生成下载：${result.filename}`);
+        } catch (error) { showStatus(status, `下载原图失败：${error?.message || '请重试'}`); }
+        finally { status._progress.removeAttribute('value'); setExportBusy(status, false); hideStatus(status, 6000); }
+    }
+
+    // Public web-client identifier supplied by the referenced downloader; never store session cookies.
+    const MEDIA_API_BEARER = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+    async function fetchTweetMedia(postId) {
+        if (!/^\d{1,21}$/.test(postId)) throw new Error('无法读取帖子编号，请刷新 X 页面后重试');
+        const TWEET_RESULT_BY_REST_ID_QUERY_ID = "zAz9764BcLZOJ0JU2wrd1A";
+
+        const TWEET_DETAIL_FEATURES = {
+            "creator_subscriptions_tweet_preview_api_enabled": true,
+            "premium_content_api_read_enabled": false,
+            "communities_web_enable_tweet_community_results_fetch": true,
+            "c9s_tweet_anatomy_moderator_badge_enabled": true,
+            "responsive_web_grok_analyze_button_fetch_trends_enabled": false,
+            "responsive_web_grok_analyze_post_followups_enabled": false,
+            "responsive_web_jetfuel_frame": false,
+            "responsive_web_grok_share_attachment_enabled": true,
+            "articles_preview_enabled": true,
+            "responsive_web_edit_tweet_api_enabled": true,
+            "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
+            "view_counts_everywhere_api_enabled": true,
+            "longform_notetweets_consumption_enabled": true,
+            "responsive_web_twitter_article_tweet_consumption_enabled": true,
+            "tweet_awards_web_tipping_enabled": false,
+            "responsive_web_grok_show_grok_translated_post": false,
+            "responsive_web_grok_analysis_button_from_backend": false,
+            "creator_subscriptions_quote_tweet_preview_enabled": false,
+            "freedom_of_speech_not_reach_fetch_enabled": true,
+            "standardized_nudges_misinfo": true,
+            "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
+            "longform_notetweets_rich_text_read_enabled": true,
+            "longform_notetweets_inline_media_enabled": true,
+            "profile_label_improvements_pcf_label_in_post_enabled": true,
+            "rweb_tipjar_consumption_enabled": true,
+            "verified_phone_label_enabled": false,
+            "responsive_web_grok_image_annotation_enabled": true,
+            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+            "responsive_web_graphql_timeline_navigation_enabled": true,
+            "responsive_web_enhance_cards_enabled": false
+        };
+
+        const TWEET_DETAIL_FIELD_TOGGLES = {
+            "withArticleRichContentState": true, "withArticlePlainText": false,
+            "withGrokAnalyze": false, "withDisallowedReplyControls": false
+        };
+
+        const variables = {
+            "tweetId": postId, "withCommunity": false,
+            "includePromotedContent": false, "withVoice": false
+        };
+
+        const apiUrl = `https://x.com/i/api/graphql/${TWEET_RESULT_BY_REST_ID_QUERY_ID}/TweetResultByRestId`;
+        const url = `${apiUrl}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(TWEET_DETAIL_FEATURES))}&fieldToggles=${encodeURIComponent(JSON.stringify(TWEET_DETAIL_FIELD_TOGGLES))}`;
+
+        const csrf = document.cookie.split(';').find(value => value.trim().startsWith('ct0='));
+        if (!csrf) throw new Error('请登录 X 后重试');
+        const headers = {
+            authorization: MEDIA_API_BEARER,
+            'x-csrf-token': decodeURIComponent(csrf.slice(csrf.indexOf('=') + 1)),
+            'x-twitter-active-user': 'yes', 'x-twitter-auth-type': 'OAuth2Session',
+            'x-twitter-client-language': 'en'
+        };
+        return await new Promise((resolve, reject) => GM_xmlhttpRequest({
+            method: 'GET', url, headers, responseType: 'json', timeout: 30000,
+            onload(response) {
+                if (response.status < 200 || response.status >= 300) { reject(new Error('帖子媒体接口请求失败')); return; }
+                try { resolve(typeof response.response === 'string' ? JSON.parse(response.response) : response.response); }
+                catch { reject(new Error('无法读取帖子媒体信息')); }
+            },
+            onerror: () => reject(new Error('帖子媒体接口连接失败')),
+            ontimeout: () => reject(new Error('帖子媒体接口请求超时'))
+        }));
+    }
+
 
     // ==========================================================
     // 查找正确的 Action Row
     // ==========================================================
     function findActionRow(caret) {
         let current = caret;
+        const tweet = caret.closest('article[data-testid="tweet"]');
 
         for (let i = 0; i < 10; i++) {
-            if (!current.parentElement) break;
+            if (!current.parentElement || current === tweet) break;
             const parent = current.parentElement;
             const children = [...parent.children];
 
             const moreChild = children.find(child => child === current || child.contains(caret));
-            const grokChild = children.find(child => !!child.querySelector('button[aria-label="Grok 操作"]'));
+            const grokChild = children.find(child => child.matches('button[aria-label="Grok 操作"]') || child.querySelector('button[aria-label="Grok 操作"]'));
 
             if (moreChild && grokChild && moreChild !== grokChild) {
                 return { row: parent, more: moreChild };
@@ -887,6 +1252,7 @@
     // ==========================================================
     function addButton(tweet) {
         if (!tweet || !tweet.isConnected) return;
+        addMediaButton(tweet);
         const existing = tweet.querySelector(`.${BUTTON_CLASS}`);
         const images = getImages(tweet);
         if (images.length < 2) {
@@ -929,7 +1295,7 @@
             const currentImages = getImages(tweet);
             if (currentImages.length < 2) return;
 
-            openViewer(currentImages);
+            openViewer(currentImages, tweet);
         }, true);
 
         wrapper.appendChild(button);
@@ -939,30 +1305,29 @@
     // ==========================================================
     // Tampermonkey 跨域下载
     // ==========================================================
-    function gmRequest(url) {
+    function gmRequest(url, { timeout = 30000, onProgress } = {}) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
                 responseType: 'blob',
-                timeout: 30000,
-                headers: {
-                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-                },
+                timeout,
+                headers: { 'Accept': url.includes('video.twimg.com/') ? 'video/mp4,video/*;q=0.9,*/*;q=0.8' : 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+                onprogress: onProgress,
                 onload: response => {
                     if (response.status >= 200 && response.status < 300) {
                         if (response.response) {
                             resolve(response.response);
                             return;
                         }
-                        reject(new Error('服务器未返回图片数据'));
+                        reject(new Error('服务器未返回媒体数据'));
                         return;
                     }
                     reject(new Error(`HTTP ${response.status}`));
                 },
-                onerror: () => reject(new Error('GM_xmlhttpRequest 网络错误')),
-                ontimeout: () => reject(new Error('图片下载超时')),
-                onabort: () => reject(new Error('图片下载取消'))
+                onerror: () => reject(new Error('媒体下载网络错误')),
+                ontimeout: () => reject(new Error('媒体下载超时')),
+                onabort: () => reject(new Error('媒体下载已取消'))
             });
         });
     }
@@ -1334,7 +1699,7 @@
         const dialog = statusEl.closest('dialog');
         statusEl._exporting = busy;
         statusEl._progress.hidden = !busy;
-        for (const button of dialog.querySelectorAll('.x-copy-button, .x-download-button')) {
+        for (const button of dialog.querySelectorAll('.x-copy-button, .x-download-button, .x-originals-button')) {
             button.disabled = busy;
         }
         const closeButton = dialog.querySelector('.x-expand-close');
@@ -1445,7 +1810,7 @@
     // ==========================================================
     // 打开查看器
     // ==========================================================
-    function openViewer(images) {
+    function openViewer(images, tweet = null) {
         closeViewer();
         const stored = getStoredSettings();
         const selected = new Set(images.slice(0, 4).map((_, index) => index));
@@ -1456,6 +1821,7 @@
         overlay.setAttribute('closedby', 'any');
         let renderFrame = null;
         const imageCache = createImageCache();
+        if (tweet) viewerResources.set(tweet, imageCache);
         let disposed = false;
 
         const toolbar = document.createElement('div');
@@ -1555,9 +1921,10 @@
         actions.className = 'x-expand-actions';
         const copyButton = makeButton('复制所选', 'x-copy-button');
         const downloadButton = makeButton('下载所选', 'x-download-button');
+        const originalsButton = makeButton('下载原图', 'x-originals-button');
         const closeButton = makeButton('关闭', 'x-expand-close');
         closeButton.autofocus = true;
-        actions.append(copyButton, downloadButton, closeButton);
+        actions.append(copyButton, downloadButton, originalsButton, closeButton);
         toolbar.append(leftBox, settingsBox, actions);
 
         const selectionGroup = document.createElement('fieldset');
@@ -1674,7 +2041,7 @@
         }
         function updateControls() {
             const busy = Boolean(status._exporting);
-            copyButton.disabled = downloadButton.disabled = busy || !selected.size;
+            copyButton.disabled = downloadButton.disabled = originalsButton.disabled = busy || !selected.size;
             selectionGroup.disabled = layoutGroup.disabled = busy;
             fmtSelect.disabled = scaleSelect.disabled = busy;
             qualitySlider.disabled = busy || fmtSelect.value === 'image/png';
@@ -1759,6 +2126,7 @@
         }
         copyButton.addEventListener('click', () => handleCopy(selectedImageUrls(images, selected), copyButton, status, getCurrentOptions, imageCache));
         downloadButton.addEventListener('click', () => handleDownload(selectedImageUrls(images, selected), downloadButton, status, getCurrentOptions, imageCache));
+        originalsButton.addEventListener('click', () => handleOriginalDownload(selectedImageUrls(images, selected), originalsButton, status, imageCache, getPostIdentity(tweet)));
         closeButton.addEventListener('click', closeViewer);
         overlay.addEventListener('click', event => event.stopPropagation());
         if (!('closedBy' in HTMLDialogElement.prototype)) {
@@ -1788,6 +2156,7 @@
             if (renderFrame !== null) cancelAnimationFrame(renderFrame);
             entries.forEach(entry => entry.img.removeAttribute('src'));
             imageCache.dispose();
+            if (tweet && viewerResources.get(tweet) === imageCache) viewerResources.delete(tweet);
         }
         overlay._dispose = disposeViewer;
         overlay.addEventListener('close', () => { disposeViewer(); overlay.remove(); }, { once: true });
@@ -1862,11 +2231,11 @@
     // 仅检查新增或内部变化的推文，忽略脚本自己的界面更新。
     new MutationObserver(mutations => {
         for (const mutation of mutations) {
-            if (mutation.target.closest?.('#' + OVERLAY_ID + ', .' + BUTTON_CLASS)) continue;
+            if (mutation.target.closest?.('#' + OVERLAY_ID + ', .' + BUTTON_CLASS + ', .' + MEDIA_BUTTON_CLASS)) continue;
             const tweet = mutation.target.closest?.('article[data-testid="tweet"]');
             if (tweet) queueTweets(tweet);
             for (const node of mutation.addedNodes) {
-                if (node.nodeType !== 1 || node.matches('.' + BUTTON_CLASS + ', #' + OVERLAY_ID)) continue;
+                if (node.nodeType !== 1 || node.matches('.' + BUTTON_CLASS + ', .' + MEDIA_BUTTON_CLASS + ', #' + OVERLAY_ID)) continue;
                 queueTweets(node);
             }
         }
