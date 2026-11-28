@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.6.0
+// @version      6.7.1
 // @description  展开、选择和排版 X 帖子图片；支持拼图复制、原图和视频下载，多文件打包 ZIP
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
@@ -42,7 +42,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.6.0';
+    const VERSION = '6.7.1';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const MEDIA_BUTTON_CLASS = '__x_media_download_v6__';
@@ -50,6 +50,7 @@
     const viewerResources = new WeakMap();
     const OVERLAY_ID = '__x_carousel_overlay_v6__';
     const STYLE_ID = '__x_carousel_style_v6__';
+    const LAYOUT_CONTROLS_ID = '__x_carousel_layout_controls_v6__';
     const WIDTH_BUTTON_ID = '__x_carousel_width_v6__';
     const IMAGE_LAYOUTS = [
         { id: 'horizontal', label: '横向' },
@@ -70,6 +71,7 @@
         QUALITY: '__x_carousel_quality_v6__',
         SCALE: '__x_carousel_scale_v6__',
         CONTENT_WIDTH: '__x_carousel_content_width_v6__',
+        CONTENT_POSITION: '__x_carousel_content_position_v6__',
         LAYOUT: '__x_carousel_layout_v6__'
     };
 
@@ -118,15 +120,26 @@
         if (IMAGE_LAYOUTS.some(item => item.id === settings.layout)) writeSetting(STORAGE_KEYS.LAYOUT, settings.layout);
     }
 
-    // ==========================================================
-    // 切换桌面内容宽度，刷新页面后保留选择。
-    // ==========================================================
-    function initWidthControl(onWidthChange) {
-        if (document.getElementById(WIDTH_BUTTON_ID)) return;
+    function initLayoutControls(onLayoutChange) {
+        if (document.getElementById(LAYOUT_CONTROLS_ID)) return;
 
         const storedMode = readSetting(STORAGE_KEYS.CONTENT_WIDTH);
         let modeIndex = WIDTH_MODES.findIndex(mode => mode.id === storedMode);
         if (modeIndex < 0) modeIndex = 1;
+
+        const controls = document.createElement('div');
+        controls.id = LAYOUT_CONTROLS_ID;
+
+        const positionLabel = document.createElement('label');
+        positionLabel.textContent = '内容位置';
+        const position = document.createElement('input');
+        position.type = 'range';
+        position.dir = 'ltr';
+        position.min = '0';
+        position.max = '100';
+        position.step = '1';
+        position.value = readSetting(STORAGE_KEYS.CONTENT_POSITION) ?? '50';
+        positionLabel.appendChild(position);
 
         const button = document.createElement('button');
         button.id = WIDTH_BUTTON_ID;
@@ -137,11 +150,21 @@
             const next = WIDTH_MODES[(modeIndex + 1) % WIDTH_MODES.length];
             document.documentElement.style.setProperty('--x-carousel-content-width', mode.width);
             button.dataset.mode = mode.id;
-            button.textContent = `切换宽度：${mode.label}`;
+            button.textContent = `宽度：${mode.label}`;
             button.title = mode.id === 'full' ? '内容占满导航栏右侧的空间' : `内容宽度上限：${parseInt(mode.width, 10)} px`;
-            button.setAttribute('aria-label', button.textContent);
+            button.setAttribute('aria-label', `切换宽度：${mode.label}`);
             button.setAttribute('aria-description', `下一个：${next.label}`);
-            onWidthChange();
+            position.disabled = mode.id === 'full';
+            positionLabel.title = position.disabled ? '全宽时内容区没有移动空间' : '';
+            onLayoutChange();
+        }
+
+        function applyPosition() {
+            const value = position.valueAsNumber;
+            document.documentElement.style.setProperty('--x-carousel-content-position', value / 100);
+            const landmarks = { 0: '最左', 50: '居中', 100: '最右' };
+            position.setAttribute('aria-valuetext', landmarks[value] ?? `${value}%`);
+            onLayoutChange();
         }
 
         button.addEventListener('click', () => {
@@ -149,9 +172,43 @@
             applyMode();
             writeSetting(STORAGE_KEYS.CONTENT_WIDTH, WIDTH_MODES[modeIndex].id);
         });
+        position.addEventListener('input', applyPosition);
+        position.addEventListener('change', () => {
+            writeSetting(STORAGE_KEYS.CONTENT_POSITION, position.value);
+        });
 
         applyMode();
-        document.body.appendChild(button);
+        applyPosition();
+        controls.append(positionLabel, button);
+        document.body.appendChild(controls);
+        syncLayoutControlTheme(controls);
+    }
+
+    function syncLayoutControlTheme(controls) {
+        const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+
+        function updateTheme() {
+            const bodyColor = getComputedStyle(document.body).backgroundColor;
+            const pageColor = bodyColor === 'rgba(0, 0, 0, 0)'
+                ? getComputedStyle(document.documentElement).backgroundColor : bodyColor;
+            const channels = /^rgb\((\d+), (\d+), (\d+)\)$/.exec(pageColor);
+            if (channels) {
+                const [, red, green, blue] = channels;
+                const brightness = red * 0.299 + green * 0.587 + blue * 0.114;
+                controls.dataset.theme = brightness < 128 ? 'dark' : 'light';
+                controls.style.setProperty('--x-carousel-toolbar-surface', pageColor);
+            } else {
+                controls.dataset.theme = systemTheme.matches ? 'dark' : 'light';
+                controls.style.removeProperty('--x-carousel-toolbar-surface');
+            }
+        }
+
+        // X can set a page theme independently of the system theme.
+        const observer = new MutationObserver(updateTheme);
+        observer.observe(document.body, { attributes: true, attributeFilter: ['style', 'class', 'data-theme'] });
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+        systemTheme.addEventListener('change', updateTheme);
+        updateTheme();
     }
 
     // 保留原生搜索组件及搜索建议，避免移动 React 管理的节点。
@@ -345,6 +402,13 @@
                     box-sizing: border-box !important;
                 }
 
+                #react-root [data-x-carousel-columns] > [data-testid="primaryColumn"] {
+                    --x-carousel-content-space: max(0px, 100% - var(--x-carousel-content-width, 960px));
+                    --x-carousel-position: var(--x-carousel-content-position, .5);
+                    margin-left: calc(var(--x-carousel-content-space) * var(--x-carousel-position)) !important;
+                    margin-right: calc(var(--x-carousel-content-space) * (1 - var(--x-carousel-position))) !important;
+                }
+
                 /* 解除信息流内部居中容器和推文卡片的宽度上限。 */
                 #react-root [data-testid="primaryColumn"] :is(div, section):has(article[data-testid="tweet"]),
                 #react-root [data-testid="primaryColumn"] article[data-testid="tweet"] {
@@ -422,38 +486,90 @@
                 }
             }
 
-            #${WIDTH_BUTTON_ID} {
+            #${LAYOUT_CONTROLS_ID} {
+                --x-carousel-toolbar-default: #fff;
+                --x-carousel-toolbar-border: #cfd9de;
+                --x-carousel-toolbar-text: #0f1419;
+                --x-carousel-toolbar-muted: #536471;
+                --x-carousel-toolbar-hover: #eff3f4;
+                --x-carousel-toolbar-focus: #0077c8;
                 display: none !important;
                 position: fixed !important;
                 right: 20px !important;
                 bottom: 148px !important;
                 z-index: 9999 !important;
                 align-items: center !important;
-                justify-content: center !important;
-                min-height: 40px !important;
-                padding: 10px 16px !important;
-                border: 1px solid #536471 !important;
-                border-radius: 9999px !important;
-                background: #0f1419 !important;
-                color: #fff !important;
-                font: 600 14px/1.4 system-ui, sans-serif !important;
+                box-sizing: border-box !important;
+                padding: 3px !important;
+                border: 1px solid var(--x-carousel-toolbar-border) !important;
+                border-radius: 8px !important;
+                background: var(--x-carousel-toolbar-surface, var(--x-carousel-toolbar-default)) !important;
+                color: var(--x-carousel-toolbar-text) !important;
+                color-scheme: light;
+                font: 13px/1.4 system-ui, sans-serif !important;
                 white-space: nowrap !important;
+                box-shadow: 0 1px 4px rgb(0 0 0 / .12) !important;
+            }
+
+            #${LAYOUT_CONTROLS_ID}[data-theme="dark"] {
+                --x-carousel-toolbar-default: #15202b;
+                --x-carousel-toolbar-border: #38444d;
+                --x-carousel-toolbar-text: #e7e9ea;
+                --x-carousel-toolbar-muted: #a1b0bb;
+                --x-carousel-toolbar-hover: #253341;
+                --x-carousel-toolbar-focus: #1d9bf0;
+                color-scheme: dark;
+            }
+
+            #${LAYOUT_CONTROLS_ID} > label {
+                display: flex !important;
+                align-items: center !important;
+                gap: 10px !important;
+                padding: 0 10px 0 7px !important;
+                margin-inline-end: 3px !important;
+                border-inline-end: 1px solid var(--x-carousel-toolbar-border) !important;
+                color: var(--x-carousel-toolbar-muted) !important;
+                font-size: 12px !important;
+            }
+
+            #${LAYOUT_CONTROLS_ID} input[type="range"] {
+                width: 84px !important;
+                height: 32px !important;
+                margin: 0 !important;
+                accent-color: var(--x-carousel-toolbar-muted);
+                cursor: pointer;
+            }
+
+            #${LAYOUT_CONTROLS_ID} input:disabled {
+                cursor: default;
+            }
+
+            #${WIDTH_BUTTON_ID} {
+                box-sizing: border-box !important;
+                width: 86px !important;
+                height: 32px !important;
+                padding: 0 !important;
+                border: 0 !important;
+                border-radius: 5px !important;
+                background: transparent !important;
+                color: inherit !important;
+                font: inherit !important;
+                font-weight: 600 !important;
                 cursor: pointer !important;
-                box-shadow: 0 2px 8px rgba(0, 0, 0, .18) !important;
             }
 
             #${WIDTH_BUTTON_ID}:hover {
-                background: #272c30 !important;
+                background: var(--x-carousel-toolbar-hover) !important;
             }
 
-            #${WIDTH_BUTTON_ID}:focus-visible {
-                outline: 3px solid #1d9bf0 !important;
-                outline-offset: 3px !important;
+            #${LAYOUT_CONTROLS_ID} :is(button, input):focus-visible {
+                outline: 2px solid var(--x-carousel-toolbar-focus) !important;
+                outline-offset: 1px !important;
             }
 
             @media (min-width: 1000px) {
-                body:has(#react-root [data-testid="primaryColumn"]) #${WIDTH_BUTTON_ID} {
-                    display: inline-flex !important;
+                body:has(#react-root [data-testid="primaryColumn"]) #${LAYOUT_CONTROLS_ID} {
+                    display: flex !important;
                 }
             }
 
@@ -2246,7 +2362,7 @@
     // ==========================================================
     injectStyle();
     const scheduleSearchLayout = initSearchLayout();
-    initWidthControl(scheduleSearchLayout);
+    initLayoutControls(scheduleSearchLayout);
     queueTweets(document);
     console.log(`[X轮播展开] v${VERSION} 已启动 (支持格式选择/压缩调节/体积预估)`);
 })();
