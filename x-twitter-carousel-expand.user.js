@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X / Twitter 轮播图展开 (画质与体积优化版)
 // @namespace    https://github.com/balh55y/x-twitter-carousel-expand
-// @version      6.7.1
+// @version      6.7.3
 // @description  展开、选择和排版 X 帖子图片；支持拼图复制、原图和视频下载，多文件打包 ZIP
 // @author       ChatGPT & DeepSeek
 // @match        https://x.com/*
@@ -42,7 +42,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '6.7.1';
+    const VERSION = '6.7.3';
 
     const BUTTON_CLASS = '__x_carousel_expand_v6__';
     const MEDIA_BUTTON_CLASS = '__x_media_download_v6__';
@@ -495,20 +495,16 @@
                 --x-carousel-toolbar-focus: #0077c8;
                 display: none !important;
                 position: fixed !important;
-                right: 20px !important;
+                right: 22px !important;
                 bottom: 148px !important;
                 z-index: 9999 !important;
-                align-items: center !important;
-                box-sizing: border-box !important;
-                padding: 3px !important;
-                border: 1px solid var(--x-carousel-toolbar-border) !important;
-                border-radius: 8px !important;
-                background: var(--x-carousel-toolbar-surface, var(--x-carousel-toolbar-default)) !important;
+                width: 168px !important;
+                grid-template-columns: minmax(0, 1fr) !important;
+                gap: 10px !important;
                 color: var(--x-carousel-toolbar-text) !important;
                 color-scheme: light;
                 font: 13px/1.4 system-ui, sans-serif !important;
                 white-space: nowrap !important;
-                box-shadow: 0 1px 4px rgb(0 0 0 / .12) !important;
             }
 
             #${LAYOUT_CONTROLS_ID}[data-theme="dark"] {
@@ -521,19 +517,31 @@
                 color-scheme: dark;
             }
 
-            #${LAYOUT_CONTROLS_ID} > label {
+            #${LAYOUT_CONTROLS_ID} > label,
+            #${WIDTH_BUTTON_ID} {
                 display: flex !important;
                 align-items: center !important;
-                gap: 10px !important;
-                padding: 0 10px 0 7px !important;
-                margin-inline-end: 3px !important;
-                border-inline-end: 1px solid var(--x-carousel-toolbar-border) !important;
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-height: 44px !important;
+                padding: 0 12px !important;
+                border: 1px solid var(--x-carousel-toolbar-border) !important;
+                border-radius: 16px !important;
+                background: var(--x-carousel-toolbar-surface, var(--x-carousel-toolbar-default)) !important;
+                color: inherit !important;
+                font: inherit !important;
+                box-shadow: 0 1px 4px rgb(0 0 0 / .12) !important;
+            }
+
+            #${LAYOUT_CONTROLS_ID} > label {
+                gap: 8px !important;
                 color: var(--x-carousel-toolbar-muted) !important;
                 font-size: 12px !important;
             }
 
             #${LAYOUT_CONTROLS_ID} input[type="range"] {
-                width: 84px !important;
+                flex: 1 1 0 !important;
+                min-width: 0 !important;
                 height: 32px !important;
                 margin: 0 !important;
                 accent-color: var(--x-carousel-toolbar-muted);
@@ -545,15 +553,7 @@
             }
 
             #${WIDTH_BUTTON_ID} {
-                box-sizing: border-box !important;
-                width: 86px !important;
-                height: 32px !important;
-                padding: 0 !important;
-                border: 0 !important;
-                border-radius: 5px !important;
-                background: transparent !important;
-                color: inherit !important;
-                font: inherit !important;
+                justify-content: center !important;
                 font-weight: 600 !important;
                 cursor: pointer !important;
             }
@@ -568,8 +568,8 @@
             }
 
             @media (min-width: 1000px) {
-                body:has(#react-root [data-testid="primaryColumn"]) #${LAYOUT_CONTROLS_ID} {
-                    display: flex !important;
+                body:has(#react-root [data-testid="primaryColumn"]):not(:has(#layers [aria-modal="true"])) #${LAYOUT_CONTROLS_ID} {
+                    display: grid !important;
                 }
             }
 
